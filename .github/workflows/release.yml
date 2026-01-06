@@ -144,23 +144,23 @@ jobs:
 
           git push origin HEAD
 
-      - name: Comment result on PR (gh)
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.issue.number }}
-        run: |
-          status="${{ job.status }}"
-          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      # - name: Comment result on PR (gh)
+      #   if: always()
+      #   env:
+      #     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #     PR_NUMBER: ${{ github.event.issue.number }}
+      #   run: |
+      #     status="${{ job.status }}"
+      #     run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       
-          if [ "$status" = "success" ]; then
-            emoji="✅"
-          elif [ "$status" = "failure" ]; then
-            emoji="❌"
-          else
-            emoji="⚠️"
-          fi
+      #     if [ "$status" = "success" ]; then
+      #       emoji="✅"
+      #     elif [ "$status" = "failure" ]; then
+      #       emoji="❌"
+      #     else
+      #       emoji="⚠️"
+      #     fi
       
-          gh pr comment "$PR_NUMBER" \
-            --body "$emoji Release workflow **${status^^}**"$'\n\n'"Run: $run_url"
+      #     gh pr comment "$PR_NUMBER" \
+      #       --body "$emoji Release workflow **${status^^}**"$'\n\n'"Run: $run_url"
 
