@@ -69,16 +69,6 @@ jobs:
 
           echo "Project name: $NAME"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
-
-      - name: Debug workspace
-        shell: bash
-        run: |
-          echo "Comment body:"
-          printf '%s\n' "${{ github.event.comment.body }}"
-          echo
-          echo "Repo root: $(pwd)"
-          echo "Top-level files/dirs:"
-          ls -la
           
       - name: Get project version
         id: version
