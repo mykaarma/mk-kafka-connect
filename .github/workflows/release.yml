@@ -80,7 +80,11 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Build JAR
-        run: mvn -B package
+        env:
+          NAME: ${{ steps.name.outputs.name }}
+        run: |
+          cd "$NAME"
+          mvn -B package
 
       - name: Build assets and generate SHA-512 checksum
         id: assets
