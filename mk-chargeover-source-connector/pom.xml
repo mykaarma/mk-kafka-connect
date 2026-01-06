@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.mykaarma.connect</groupId>
-    <artifactId>chargeover-source-connector</artifactId>
+    <artifactId>mk-chargeover-source-connector</artifactId>
     <version>1.0.0</version>
     <packaging>jar</packaging>
 

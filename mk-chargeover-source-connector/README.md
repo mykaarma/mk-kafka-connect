@@ -99,7 +99,7 @@ This state enables the connector to:
 mvn clean package
 
 # The connector JAR will be created at:
-# target/chargeover-source-connector-1.0.0-jar-with-dependencies.jar
+# target/mk-chargeover-source-connector-1.0.0-jar-with-dependencies.jar
 ```
 
 ## Configuration
@@ -251,7 +251,7 @@ chargeover.invoice.query.params=expand=invoice_items,customer
 mvn clean package
 ```
 
-This creates a fat JAR with all dependencies: `target/chargeover-source-connector-1.0.0-jar-with-dependencies.jar`
+This creates a fat JAR with all dependencies: `target/mk-chargeover-source-connector-1.0.0-jar-with-dependencies.jar`
 
 ### Step 2: Upload to Confluent Cloud
 
@@ -549,7 +549,7 @@ mvn clean package
 
 2. **Copy to Kafka Connect plugins**:
 ```bash
-cp target/chargeover-source-connector-1.0.0-jar-with-dependencies.jar \
+cp target/mk-chargeover-source-connector-1.0.0-jar-with-dependencies.jar \
    /path/to/kafka/connect/plugins/
 ```
 
@@ -557,7 +557,7 @@ cp target/chargeover-source-connector-1.0.0-jar-with-dependencies.jar \
 ```bash
 connect-standalone.sh \
   config/connect-standalone.properties \
-  config/chargeover-source-connector.properties
+  config/mk-chargeover-source-connector.properties
 ```
 
 ### Code Structure
