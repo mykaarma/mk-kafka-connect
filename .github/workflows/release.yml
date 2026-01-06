@@ -1,0 +1,136 @@
+name: Build assets and release
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+
+    if: >
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/release')
+      
+    steps:
+      - name: Get PR head info (ref/repo/sha)
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          pr_json="$(gh api repos/$REPO/pulls/$PR_NUMBER)"
+
+          head_repo="$(echo "$pr_json" | jq -r '.head.repo.full_name')"
+          head_ref="$(echo "$pr_json" | jq -r '.head.ref')"
+          head_sha="$(echo "$pr_json" | jq -r '.head.sha')"
+
+          echo "head_repo=$head_repo" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$head_ref"   >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha"   >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR head branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pr.outputs.head_repo }}
+          ref: ${{ steps.pr.outputs.head_ref }}
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+
+      - name: Get project name
+        id: name
+        shell: bash
+        run: |
+          body="${{ github.event.comment.body }}"
+
+          NAME="$(echo "$body" | sed -nE 's#^/release[[:space:]]+##p' | xargs || true)"
+
+          if [ -z "$NAME" ]; then
+            echo "Usage: /release <project-name>"
+            exit 1
+          fi
+
+          # Optional: restrict allowed characters for safety (adjust as you like)
+          if ! [[ "$NAME" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            echo "Invalid project name: $NAME"
+            exit 1
+          fi
+
+          echo "Project name: $NAME"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Get project version
+        id: version
+        env:
+          NAME: ${{ steps.name.outputs.name }}
+        run: |
+          cd "$NAME"
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build JAR
+        run: mvn -B package
+
+      - name: Build assets and generate SHA-512 checksum
+        id: assets
+        env:
+          NAME: ${{ steps.name.outputs.name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+
+          rm -rf "assets/$NAME"
+          mkdir -p checksums
+          mkdir -p assets
+          mkdir -p assets/$NAME
+          mkdir -p assets/$NAME/lib
+
+          envsubst < templates/manifest.json > assets/$NAME/manifest.json
+
+          SOURCE_JAR="${NAME}/target/${NAME}-${VERSION}.jar"
+          DEST_DIR="assets/$NAME/lib"
+          FINAL_JAR="${NAME}-${VERSION}.jar"
+          
+          mv "$SOURCE_JAR" "$DEST_DIR/$FINAL_JAR"
+
+          cd assets
+          ZIP="$NAME.zip"
+          zip -r -FS "$ZIP" "$NAME"
+          sha512sum "$ZIP" > "../checksums/$NAME.sha512"
+      
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: Commit assets and checksum
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add assets
+          git add checksums
+          git commit -m "Update assets and checksums" \
+            || echo "Nothing to commit"
+
+          git push origin HEAD
+
+      - name: Create tag and release
+        env:
+          TAG: ${{ steps.name.outputs.name }}-${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git tag "$TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes
+
+          gh release upload "$TAG" "assets/${{ steps.assets.outputs.zip }}"
