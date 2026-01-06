@@ -1,0 +1,38 @@
+{
+    "name": "${NAME}",
+    "version": "${VERSION}",
+    "title": "${NAME}",
+    "description": "${NAME} Kafka Connect connector built by myKaarma",
+    "documentation_url": "",
+    "source_url": "",
+    "logo": "",
+    "owner": {
+      "name": "myKaarma"
+    },
+    "features": {
+      "supported_encodings": [
+        "any"
+      ]
+    },
+    "requirements": [
+      ""
+    ],
+    "license": [
+      {
+        "name": "Apache 2.0",
+        "url": "https://github.com/debezium/debezium/blob/master/LICENSE.txt"
+      }
+    ],
+    "support": {
+      "provider_name": "myKaarma",
+      "summary": "",
+      "url": "",
+      "logo": ""
+    },
+    "component_types": [
+      "source"
+    ],
+    "tags": [
+      "${NAME}"
+    ]
+}
