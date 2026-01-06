@@ -118,17 +118,6 @@ jobs:
       
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
-      - name: Commit assets
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add assets
-          git commit -m "Update assets" \
-            || echo "Nothing to commit"
-
-          git push origin HEAD
-
       - name: Create tag and release
         env:
           NAME: ${{ steps.name.outputs.name }}
@@ -142,3 +131,14 @@ jobs:
             --generate-notes
 
           gh release upload "$TAG" "assets/$NAME/${{ steps.assets.outputs.zip }}"
+
+      - name: Commit assets
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add assets
+          git commit -m "Update assets" \
+            || echo "Nothing to commit"
+
+          git push origin HEAD
