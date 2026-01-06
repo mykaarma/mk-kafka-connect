@@ -1,0 +1,22 @@
+{
+  "name": "chargeover-source",
+  "config": {
+    "connector.class": "com.mykaarma.connect.chargeover.ChargeOverSourceConnector",
+    "tasks.max": "1",
+    "chargeover.subdomain": "your-company",
+    "chargeover.username": "${secrets:CHARGEOVER_USERNAME}",
+    "chargeover.password": "${secrets:CHARGEOVER_PASSWORD}",
+    "chargeover.timezone": "UTC",
+    "topic.prefix": "chargeover",
+    "poll.interval.ms": "60000",
+    "batch.size": "500",
+    "max.retries": "3",
+    "incremental.schedule.cron": "0 0 2 * * ?",
+    "initial.datetime": "customer:2024-01-01 00:00:00,invoice:2024-01-01 00:00:00,payment:2024-01-01 00:00:00,subscription:2024-01-01 00:00:00",
+    "chargeover.entities": "customer,invoice,payment,subscription",
+    "chargeover.entity.id.fields": "customer:customer_id,invoice:invoice_id,payment:payment_id,subscription:subscription_id",
+    "chargeover.customer.query.params": "expand=customer_external&fields=id,name,email",
+    "chargeover.invoice.query.params": "expand=invoice_items,customer"
+  }
+}
+
