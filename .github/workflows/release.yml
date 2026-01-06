@@ -94,40 +94,43 @@ jobs:
         run: |
 
           rm -rf "assets/$NAME"
-          mkdir -p checksums
           mkdir -p assets
           mkdir -p assets/$NAME
-          mkdir -p assets/$NAME/lib
 
-          envsubst < templates/manifest.json > assets/$NAME/manifest.json
+          rm -rf "temp"
+          mkdir -p temp
+          mkdir -p temp/$NAME
+          mkdir -p temp/$NAME/lib
+
+          envsubst < templates/manifest.json > temp/$NAME/manifest.json
 
           SOURCE_JAR="${NAME}/target/${NAME}-${VERSION}.jar"
-          DEST_DIR="assets/$NAME/lib"
+          DEST_DIR="temp/$NAME/lib"
           FINAL_JAR="${NAME}-${VERSION}.jar"
           
           mv "$SOURCE_JAR" "$DEST_DIR/$FINAL_JAR"
 
-          cd assets
-          ZIP="$NAME.zip"
-          zip -r -FS "$ZIP" "$NAME"
-          sha512sum "$ZIP" > "../checksums/$NAME.sha512"
+          cd temp
+          ZIP="$NAME-${VERSION}.zip"
+          zip -r -FS "../assets/$NAME/$ZIP" "$NAME"
+          sha512sum "../assets/$NAME/$ZIP" > "../assets/$NAME/${NAME}-${VERSION}.sha512"
       
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
-      - name: Commit assets and checksum
+      - name: Commit assets
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add assets
-          git add checksums
-          git commit -m "Update assets and checksums" \
+          git commit -m "Update assets" \
             || echo "Nothing to commit"
 
           git push origin HEAD
 
       - name: Create tag and release
         env:
+          NAME: ${{ steps.name.outputs.name }}
           TAG: ${{ steps.name.outputs.name }}-${{ steps.version.outputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -137,4 +140,4 @@ jobs:
             --title "$TAG" \
             --generate-notes
 
-          gh release upload "$TAG" "assets/${{ steps.assets.outputs.zip }}"
+          gh release upload "$TAG" "assets/$NAME/${{ steps.assets.outputs.zip }}"
