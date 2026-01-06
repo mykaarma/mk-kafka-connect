@@ -123,7 +123,8 @@ jobs:
           cd temp
           ZIP="$NAME-${VERSION}.zip"
           zip -r -FS "../assets/$NAME/$ZIP" "$NAME"
-          sha512sum "../assets/$NAME/$ZIP" > "../assets/$NAME/${NAME}-${VERSION}.sha512"
+          cd ../assets/$NAME
+          sha512sum "$ZIP" > "${NAME}-${VERSION}.sha512"
       
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
