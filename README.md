@@ -21,10 +21,9 @@ This workflow will:
 2. Read the Maven version from `<project-name>/pom.xml`  
 3. Build and package the JAR  
 4. Recreate `assets/<project-name>/` and produce:
-   - `<project-name>.zip`
-   - `checksums/<project-name>.sha512`
-5. Commit and push assets and checksums to the PR branch  
+   - `<project-name>-<version>.zip`
+   - `<project-name>-<version>.sha512` (checksum)
+5. Commit and push assets to the PR branch  
 6. Tag `<project-name>-<version>` and create a GitHub release with the ZIP uploaded
 
-The zip file is present in the release assets and the URL can be copied from there.
-The checksum can be found in the respective file in the checksums directory.
+The zip file is also present in the release assets and the URL can be copied from there.
