@@ -237,7 +237,7 @@ public class StripeApiClient {
             Long dataAvailableEnd = reportTypeObj.getDataAvailableEnd();
             
             if (dataAvailableEnd != null) {
-                log.debug("Report type {} has data_available_end: {}", reportType, dataAvailableEnd);
+                log.info("Report type {} timezone {} has data_available_end: {}", reportType, timezone, dataAvailableEnd);
             } else {
                 log.warn("Report type {} does not have data_available_end set", reportType);
                 throw new Exception("Report type " + reportType + " does not have data_available_end set");

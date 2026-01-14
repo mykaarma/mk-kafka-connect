@@ -132,6 +132,7 @@ public class StripeReportState {
                 ", intervalStart=" + intervalStart +
                 ", intervalEnd=" + intervalEnd +
                 ", lastCommittedRow=" + lastCommittedRow +
+                ", processedInRound=" + processedInRound +
                 ", ageMs=" + getAgeMs() +
                 '}';
     }

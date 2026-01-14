@@ -307,15 +307,15 @@ public class StripeSourceTask extends SourceTask {
                             lastCommittedRow + 1, intervalStart, intervalEnd);
                 } else {
                     intervalStart = state.getIntervalEnd();
-                    intervalEnd = apiClient.getDataAvailableEnd(reportType);
+                    // intervalEnd = apiClient.getDataAvailableEnd(reportType);
                 }
             } else {
                 // No offset or first time - start fresh
                 intervalStart = config.getInitialLoadDate(reportType);
-                intervalEnd = apiClient.getDataAvailableEnd(reportType);
+                // intervalEnd = apiClient.getDataAvailableEnd(reportType);
             }
-            if (intervalStart == null || intervalEnd == null) {
-                log.error("No interval start or end found for timezone {} report type {}, skipping", timezone, reportType);
+            if (intervalStart == null) {
+                log.error("No interval start found for timezone {} report type {}, skipping", timezone, reportType);
                 continue;
             }
             if (intervalStart >= intervalEnd) {
@@ -327,12 +327,17 @@ public class StripeSourceTask extends SourceTask {
                         comboKey, roundId, intervalStart, intervalEnd);
                 continue;
             }
+            log.info("Before checking max days: Interval start: {} interval end: {} for timezone {} report type {}", intervalStart, intervalEnd, timezone, reportType);
             boolean isLastInterval = true;
+            // temp fix: always set intervalEnd to available end
+            intervalEnd = apiClient.getDataAvailableEnd(reportType);
             Long maxDaysInSeconds = config.getMaxReportIntervalDays() * 24L * 60L * 60L;
             if (intervalStart + maxDaysInSeconds < intervalEnd) {
+                log.info("Setting isLastInterval to false for timezone {} report type {} with start: {} end: {}", timezone, reportType, intervalStart, intervalEnd);
                 intervalEnd = intervalStart + maxDaysInSeconds;
                 isLastInterval = false;
             }
+            log.info("After checking max days: Interval start: {} interval end: {} for timezone {} report type {}", intervalStart, intervalEnd, timezone, reportType);
             String startTime = new Date(intervalStart * 1000).toString();
             String endTime = new Date(intervalEnd * 1000).toString();
             log.info("Start getting records for round {} report type {} timezone {} start: {} end: {} from row {}", roundId, reportType, timezone, startTime, endTime, lastCommittedRow + 1);

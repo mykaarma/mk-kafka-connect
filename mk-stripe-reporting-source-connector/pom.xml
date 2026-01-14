@@ -6,7 +6,7 @@
 
     <groupId>com.mykaarma.connect</groupId>
     <artifactId>stripe-reporting-source-connector</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
     <packaging>jar</packaging>
 
     <name>Stripe Reporting Source Connector</name>
