@@ -314,8 +314,9 @@ public class StripeSourceTask extends SourceTask {
                 intervalStart = config.getInitialLoadDate(reportType);
                 // intervalEnd = apiClient.getDataAvailableEnd(reportType);
             }
-            if (intervalStart == null) {
-                log.error("No interval start found for timezone {} report type {}, skipping", timezone, reportType);
+            intervalEnd = apiClient.getDataAvailableEnd(reportType);
+            if (intervalStart == null || intervalEnd == null) {
+                log.error("No interval start or end found for timezone {} report type {}, skipping", timezone, reportType);
                 continue;
             }
             if (intervalStart >= intervalEnd) {
@@ -330,7 +331,6 @@ public class StripeSourceTask extends SourceTask {
             log.info("Before checking max days: Interval start: {} interval end: {} for timezone {} report type {}", intervalStart, intervalEnd, timezone, reportType);
             boolean isLastInterval = true;
             // temp fix: always set intervalEnd to available end
-            intervalEnd = apiClient.getDataAvailableEnd(reportType);
             Long maxDaysInSeconds = config.getMaxReportIntervalDays() * 24L * 60L * 60L;
             if (intervalStart + maxDaysInSeconds < intervalEnd) {
                 log.info("Setting isLastInterval to false for timezone {} report type {} with start: {} end: {}", timezone, reportType, intervalStart, intervalEnd);
