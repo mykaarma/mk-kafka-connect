@@ -1,0 +1,20 @@
+{
+    "name": "stripe-reporting-source-dev",
+    "config": {
+        "connector.class": "com.mykaarma.connect.stripe.StripeSourceConnector",
+        "tasks.max": "1",
+        "stripe.api.keys": "${secrets:STRIPE_API_KEYS}",
+        "topic.prefix": "stripe_reporting_",
+        "poll.cron": "0 0 0 * * ?",
+        "batch.size": "10000",
+        "stripe.report.types": "balance_change_from_activity.itemized.3,card_payments_fees.transaction_level.2,payout_reconciliation.itemized.5",
+        "stripe.report.columns": "balance_change_from_activity.itemized.3:balance_transaction_id,created_utc,currency,gross,fee,net,reporting_category,description,automatic_payout_id,automatic_payout_effective_at_utc,customer_id,customer_name,shipping_address_state,charge_id,payment_intent_id,charge_created_utc,payment_method_type,card_brand,card_funding,payment_metadata[OrderNumber],connected_account_id,connected_account_name;card_payments_fees.transaction_level.2:balance_debited_at,balance_transaction_id,incurred_at,event_type,charge_id,refund_id,dispute_id,request_id,destination_id,connected_account_id,connected_account_country,connected_account_name,customer_id,card_brand,bin,issuing_bank,network,card_funding,card_country,card_present,fee_category,fee_name,fee_currency,plan_name,additional_explanation,variable_rate,fixed_per_item_amount,variable_volume_amount,fixed_per_item_count,min_amount,max_amount,subtotal_amount,tax_rate,tax_amount,total_amount,fx_rate,billing_currency,billing_amount,attribution_start_date,attribution_end_date,fee_id;payout_reconciliation.itemized.5:automatic_payout_id,automatic_payout_effective_at,balance_transaction_id,created_utc,created,available_on_utc,available_on,currency,gross,fee,net,reporting_category,source_id,description,regulatory_tag,automatic_payout_effective_at_utc,charge_id,payment_intent_id,charge_created_utc,charge_created,invoice_id,invoice_number,subscription_id,order_id,payment_method_type,is_link,card_brand,card_funding,card_country,statement_descriptor,dispute_reason,connected_account_id,connected_account_name,connected_account_country,connected_account_direct_charge_id,destination_payment_id,payment_metadata[OrderNumber],refund_metadata[OrderNumber],transfer_metadata[OrderNumber]",
+        "stripe.report.keys": "balance_change_from_activity.itemized.3:balance_transaction_id;card_payments_fees.transaction_level.2:fee_id;payout_reconciliation.itemized.5:balance_transaction_id",
+        "stripe.report.initial.load.dates": "balance_change_from_activity.itemized.3:2025-12-20;card_payments_fees.transaction_level.2:2025-12-20;payout_reconciliation.itemized.5:2025-12-20",
+        "stripe.report.poll.interval.ms": "5000",
+        "stripe.report.max.wait.ms": "600000",
+        "offsets.storage.topic": "stripe_reporting_offsets",
+        "in.progress.poll.interval.ms": "5000",
+        "max.report.interval.days": "2"    
+    }
+}
