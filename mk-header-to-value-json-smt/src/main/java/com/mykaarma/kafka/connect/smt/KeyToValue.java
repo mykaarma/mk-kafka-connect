@@ -1,7 +1,6 @@
 package com.mykaarma.kafka.connect.smt;
 
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.connect.connector.ConnectRecord;
@@ -36,8 +35,10 @@ public class KeyToValue<R extends ConnectRecord<R>> implements Transformation<R>
           ConfigDef.Importance.MEDIUM,
           "Name of the value field to hold the record key.");
 
+  private static final int MAX_CACHED_SCHEMAS = 1000;
+
   private String fieldName;
-  private final Map<SchemaPair, Schema> schemaUpdateCache = new ConcurrentHashMap<>();
+  private final Map<SchemaPair, Schema> schemaUpdateCache = BoundedCache.create(MAX_CACHED_SCHEMAS);
 
   @Override
   public void configure(Map<String, ?> configs) {

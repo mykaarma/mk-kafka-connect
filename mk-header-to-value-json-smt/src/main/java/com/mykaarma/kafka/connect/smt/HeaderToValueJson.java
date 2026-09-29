@@ -1,14 +1,11 @@
 package com.mykaarma.kafka.connect.smt;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.connect.connector.ConnectRecord;
@@ -59,12 +56,12 @@ public class HeaderToValueJson<R extends ConnectRecord<R>> implements Transforma
           "If true, drops the headers from the record after copying them into the value "
               + "(equivalent to HeaderToValue's operation=move). Defaults to false (copy).");
 
-  private static final ObjectMapper MAPPER = new ObjectMapper();
+  private static final int MAX_CACHED_SCHEMAS = 1000;
 
   private String fieldName;
   private Set<String> allowedHeaderKeys;
   private boolean removeHeaders;
-  private final Map<Schema, Schema> schemaUpdateCache = new ConcurrentHashMap<>();
+  private final Map<Schema, Schema> schemaUpdateCache = BoundedCache.create(MAX_CACHED_SCHEMAS);
 
   @Override
   public void configure(Map<String, ?> configs) {
@@ -135,21 +132,60 @@ public class HeaderToValueJson<R extends ConnectRecord<R>> implements Transforma
   }
 
   private String headersToJson(Headers headers) {
-    List<Map<String, String>> entries = new ArrayList<>();
+    StringBuilder json = new StringBuilder();
+    json.append('[');
+    boolean first = true;
     for (Header h : headers) {
       if (allowedHeaderKeys != null && !allowedHeaderKeys.contains(h.key())) {
         continue;
       }
-      Map<String, String> entry = new LinkedHashMap<>();
-      entry.put("key", h.key());
-      entry.put("value", Values.convertToString(h.schema(), h.value()));
-      entries.add(entry);
+      if (!first) {
+        json.append(',');
+      }
+      first = false;
+      json.append("{\"key\":");
+      appendJsonString(json, h.key());
+      json.append(",\"value\":");
+      appendJsonString(json, Values.convertToString(h.schema(), h.value()));
+      json.append('}');
     }
-    try {
-      return MAPPER.writeValueAsString(entries);
-    } catch (Exception e) {
-      throw new DataException("Failed to serialize record headers to JSON", e);
+    json.append(']');
+    return json.toString();
+  }
+
+  private static void appendJsonString(StringBuilder out, String value) {
+    if (value == null) {
+      out.append("null");
+      return;
     }
+    out.append('"');
+    for (int i = 0; i < value.length(); i++) {
+      char c = value.charAt(i);
+      switch (c) {
+        case '"':
+          out.append("\\\"");
+          break;
+        case '\\':
+          out.append("\\\\");
+          break;
+        case '\n':
+          out.append("\\n");
+          break;
+        case '\r':
+          out.append("\\r");
+          break;
+        case '\t':
+          out.append("\\t");
+          break;
+        default:
+          if (c < 0x20) {
+            out.append(String.format("\\u%04x", (int) c));
+          } else {
+            out.append(c);
+          }
+      }
+    }
+    out.append('"');
   }
 
   @Override
