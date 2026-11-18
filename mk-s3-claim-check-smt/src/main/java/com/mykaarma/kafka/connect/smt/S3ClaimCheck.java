@@ -74,11 +74,9 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
     try {
       store.probe();
     } catch (IOException e) {
-      // The SMT runs in Confluent's function runtime and the worker rebuilds what it throws, so
-      // only JDK and Kafka classes may sit in the cause chain. RejectedException is ours.
       throw new ConnectException("Could not get a claim-check upload URL from "
           + config.getString(BASE_URL_CONFIG) + ", check the URL and the credential: "
-          + e.getMessage(), e instanceof BodyStore.RejectedException ? null : e);
+          + e.getMessage(), safeCause(e));
     }
   }
 
@@ -99,7 +97,9 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
     try {
       body = MAPPER.writeValueAsBytes(plain);
     } catch (JsonProcessingException e) {
-      throw new DataException("Could not serialize the record value to JSON", e);
+      // Jackson is shaded into this jar, so its exception cannot be rebuilt by the worker.
+      throw new DataException("Could not serialize the record value to JSON: "
+          + e.getOriginalMessage());
     }
     if (body.length <= largeBytes) {
       return record;
@@ -116,7 +116,8 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
       throw new DataException("Claim-check upload rejected for event " + eventId + ": "
           + e.getMessage());
     } catch (IOException e) {
-      throw new RetriableException("Claim-check upload failed for event " + eventId, e);
+      throw new RetriableException("Claim-check upload failed for event " + eventId + ": "
+          + e.getMessage(), safeCause(e));
     }
     Map<String, Object> pointer = new LinkedHashMap<>();
     for (String field : ENVELOPE_FIELDS) {
@@ -130,6 +131,23 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
     pointer.put(CLAIM_CHECK_FIELD, claim);
     return record.newRecord(record.topic(), record.kafkaPartition(), record.keySchema(),
         record.key(), null, pointer, record.timestamp(), record.headers());
+  }
+
+  /**
+   * The cause to keep on an exception that leaves the SMT. The SMT runs in Confluent's function
+   * runtime and the worker rebuilds what it throws, so a class that is not a JDK or Kafka type,
+   * such as our own exception or a shaded Jackson one, becomes ClassNotFoundException and hides the
+   * real error. Such a chain is dropped; callers put its message in their own.
+   */
+  static Throwable safeCause(Throwable e) {
+    for (Throwable t = e; t != null; t = t.getCause()) {
+      String name = t.getClass().getName();
+      if (!(name.startsWith("java.") || name.startsWith("javax.")
+          || name.startsWith("org.apache.kafka."))) {
+        return null;
+      }
+    }
+    return e;
   }
 
   /** Limits a value to what the ops API accepts in an object key: 1-128 of A-Z a-z 0-9 . _ - */

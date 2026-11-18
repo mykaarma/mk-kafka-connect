@@ -1,5 +1,6 @@
 package com.mykaarma.kafka.connect.smt;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
@@ -75,12 +76,18 @@ class ApiBodyStore implements BodyStore {
         .header("Authorization", authHeader)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
-        .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(payload)))
+        .POST(HttpRequest.BodyPublishers.ofString(toJson(payload)))
         .build();
     HttpResponse<String> response = send(request);
     int status = response.statusCode();
     if (status == 200) {
-      return MAPPER.readTree(response.body());
+      try {
+        return MAPPER.readTree(response.body());
+      } catch (JsonProcessingException e) {
+        // Plain IOException: Jackson is shaded into this jar, and an exception of its own would
+        // not survive the trip out of Confluent's function runtime.
+        throw new IOException("POST /claim-check returned malformed JSON: " + e.getOriginalMessage());
+      }
     }
     String message = "POST /claim-check returned HTTP " + status;
     // A 4xx means this request is wrong or the credential is, so a retry repeats it.
@@ -88,6 +95,14 @@ class ApiBodyStore implements BodyStore {
       throw new RejectedException(message);
     }
     throw new IOException(message);
+  }
+
+  private static String toJson(Map<String, Object> payload) throws IOException {
+    try {
+      return MAPPER.writeValueAsString(payload);
+    } catch (JsonProcessingException e) {
+      throw new IOException("Could not build the POST /claim-check body: " + e.getOriginalMessage());
+    }
   }
 
   private HttpResponse<String> send(HttpRequest request) throws IOException {

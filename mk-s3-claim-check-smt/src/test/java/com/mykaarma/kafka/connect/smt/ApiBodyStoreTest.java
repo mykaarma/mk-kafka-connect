@@ -133,6 +133,20 @@ public class ApiBodyStoreTest {
   }
 
   @Test
+  public void malformedJsonFromTheRouteIsAPlainIoException() {
+    routeBody = "{\"putUrl\": not json";
+    try {
+      store().put("e1", "d1", new byte[] {1});
+      fail();
+    } catch (IOException expected) {
+      // Exactly IOException, with no cause: a Jackson exception would not survive the runtime.
+      assertEquals(IOException.class, expected.getClass());
+      assertNull(expected.getCause());
+      assertTrue(expected.getMessage().contains("malformed JSON"));
+    }
+  }
+
+  @Test
   public void responseWithoutAUrlIsAnError() {
     routeBody = "{\"bucket\":\"claims\"}";
     try {

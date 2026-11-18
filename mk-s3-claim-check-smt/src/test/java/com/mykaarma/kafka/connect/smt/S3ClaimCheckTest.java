@@ -31,9 +31,13 @@ public class S3ClaimCheckTest {
     boolean reject;
     boolean probed;
     boolean rejectProbe;
+    IOException failure;
 
     @Override
     public void probe() throws IOException {
+      if (failure != null) {
+        throw failure;
+      }
       if (rejectProbe) {
         throw new RejectedException("POST /claim-check returned HTTP 404");
       }
@@ -45,6 +49,9 @@ public class S3ClaimCheckTest {
 
     @Override
     public Location put(String eventId, String dealerUuid, byte[] body) throws IOException {
+      if (failure != null) {
+        throw failure;
+      }
       if (reject) {
         throw new RejectedException("HTTP 400");
       }
@@ -211,6 +218,76 @@ public class S3ClaimCheckTest {
     e.remove("dealerUuid");
     smt.apply(record(e));
     assertTrue(store.objects.containsKey("oversize/kafka-connect/2026-11-17/unknown/e1.json"));
+  }
+
+  /** A shaded Jackson exception: the worker cannot rebuild it, so it must not leave the SMT. */
+  private static IOException withJacksonCause() {
+    return new IOException("bad body from the route",
+        new com.fasterxml.jackson.core.JsonParseException(null, "Unexpected character"));
+  }
+
+  @Test
+  public void startupFailureDropsAJacksonCauseAndKeepsTheMessage() {
+    store.failure = withJacksonCause();
+    try {
+      smt.configure(config());
+      fail();
+    } catch (ConnectException e) {
+      assertNull(e.getCause());
+      assertTrue(e.getMessage().contains("bad body from the route"));
+    }
+  }
+
+  @Test
+  public void retriableUploadFailureDropsAJacksonCauseAndKeepsTheMessage() {
+    smt.configure(config());
+    store.failure = withJacksonCause();
+    try {
+      smt.apply(record(event("e1", 500)));
+      fail();
+    } catch (RetriableException e) {
+      assertNull(e.getCause());
+      assertTrue(e.getMessage().contains("bad body from the route"));
+    }
+  }
+
+  @Test
+  public void aJdkCauseIsKept() {
+    smt.configure(config());
+    IOException timeout = new IOException("timed out", new java.net.SocketTimeoutException("read"));
+    store.failure = timeout;
+    try {
+      smt.apply(record(event("e1", 500)));
+      fail();
+    } catch (RetriableException e) {
+      assertSame(timeout, e.getCause());
+    }
+  }
+
+  @Test
+  public void serializationFailureDropsTheJacksonCause() {
+    smt.configure(config());
+    Map<String, Object> e = event("e1", 500);
+    e.put("unserializable", new Object());
+    try {
+      smt.apply(record(e));
+      fail();
+    } catch (DataException ex) {
+      assertNull(ex.getCause());
+      assertTrue(ex.getMessage().startsWith("Could not serialize the record value to JSON"));
+    }
+  }
+
+  @Test
+  public void safeCauseKeepsOnlyJdkAndKafkaChains() {
+    IOException plain = new IOException("x", new IllegalStateException("y"));
+    assertSame(plain, S3ClaimCheck.safeCause(plain));
+    assertSame(plain.getCause(), S3ClaimCheck.safeCause(plain.getCause()));
+    assertNull(S3ClaimCheck.safeCause(new BodyStore.RejectedException("HTTP 400")));
+    assertNull(S3ClaimCheck.safeCause(withJacksonCause()));
+    // One foreign class anywhere in the chain is enough to drop it.
+    assertNull(S3ClaimCheck.safeCause(new IOException("outer", withJacksonCause())));
+    assertSame(null, S3ClaimCheck.safeCause(null));
   }
 
   @Test(expected = ConnectException.class)
