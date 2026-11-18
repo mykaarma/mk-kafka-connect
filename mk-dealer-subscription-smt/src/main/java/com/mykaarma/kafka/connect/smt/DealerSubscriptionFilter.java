@@ -89,7 +89,10 @@ public class DealerSubscriptionFilter<R extends ConnectRecord<R>> implements Tra
     try {
       snapshot = client.snapshot();
     } catch (IOException e) {
-      throw new ConnectException("Could not load the initial subscription snapshot", e);
+      // SubscriptionClient throws only JDK exceptions, which the worker can rebuild; the reason
+      // goes in the message too, since a cause that cannot be rebuilt would hide it.
+      throw new ConnectException("Could not load the initial subscription snapshot: "
+          + e.getMessage(), e);
     }
     LOG.info("Loaded subscription snapshot version {} with {} keys", snapshot.version,
         snapshot.keys.size());

@@ -1,5 +1,6 @@
 package com.mykaarma.kafka.connect.smt;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
@@ -78,7 +79,13 @@ class SubscriptionClient {
       if (response.statusCode() != 200) {
         throw new IOException("GET " + path + " returned HTTP " + response.statusCode());
       }
-      return MAPPER.readTree(response.body());
+      try {
+        return MAPPER.readTree(response.body());
+      } catch (JsonProcessingException e) {
+        // A plain IOException: Jackson is shaded into this jar, and the worker cannot rebuild an
+        // exception of its own class when Confluent's function runtime sends one back.
+        throw new IOException("GET " + path + " returned malformed JSON: " + e.getOriginalMessage());
+      }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new IOException("Interrupted calling " + path, e);
