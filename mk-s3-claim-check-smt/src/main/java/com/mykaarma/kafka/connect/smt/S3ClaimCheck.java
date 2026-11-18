@@ -30,14 +30,15 @@ import org.apache.kafka.connect.transforms.Transformation;
 public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<R> {
 
   public static final String LARGE_BYTES_CONFIG = "large.event.bytes";
-  public static final String BUCKET_CONFIG = "large.event.s3.bucket";
-  public static final String REGION_CONFIG = "large.event.s3.region";
-  public static final String PREFIX_CONFIG = "large.event.s3.prefix";
-  public static final String ACCESS_KEY_CONFIG = "large.event.aws.access.key.id";
-  public static final String SECRET_KEY_CONFIG = "large.event.aws.secret.access.key";
+  public static final String BASE_URL_CONFIG = "ops.api.base.url";
+  public static final String USERNAME_CONFIG = "ops.api.username";
+  public static final String PASSWORD_CONFIG = "ops.api.password";
+  public static final String CONNECT_TIMEOUT_CONFIG = "http.connect.timeout.ms";
+  public static final String READ_TIMEOUT_CONFIG = "http.read.timeout.ms";
+  public static final String UPLOAD_TIMEOUT_CONFIG = "http.upload.timeout.ms";
 
   static final String CLAIM_CHECK_FIELD = "claimCheck";
-  static final String PROBE_KEY = "_probe";
+  static final String UNKNOWN_DEALER = "unknown";
   static final List<String> ENVELOPE_FIELDS = Arrays.asList(
       "dealerUuid", "dataType", "eventType", "eventId", "eventTimestamp", "departmentUuid");
 
@@ -45,40 +46,46 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
       .define(LARGE_BYTES_CONFIG, ConfigDef.Type.INT, 800_000, ConfigDef.Range.atLeast(1),
           ConfigDef.Importance.HIGH,
           "Estimated serialized size above which a record is claim-checked.")
-      .define(BUCKET_CONFIG, ConfigDef.Type.STRING, ConfigDef.NO_DEFAULT_VALUE,
-          ConfigDef.Importance.HIGH, "S3 bucket for oversized bodies.")
-      .define(REGION_CONFIG, ConfigDef.Type.STRING, ConfigDef.NO_DEFAULT_VALUE,
-          ConfigDef.Importance.HIGH, "S3 bucket region.")
-      .define(PREFIX_CONFIG, ConfigDef.Type.STRING, "claim-check", ConfigDef.Importance.MEDIUM,
-          "Key prefix for oversized bodies.")
-      .define(ACCESS_KEY_CONFIG, ConfigDef.Type.STRING, ConfigDef.NO_DEFAULT_VALUE,
-          ConfigDef.Importance.HIGH, "Access key id of a user with s3:PutObject on the prefix.")
-      .define(SECRET_KEY_CONFIG, ConfigDef.Type.PASSWORD, ConfigDef.NO_DEFAULT_VALUE,
-          ConfigDef.Importance.HIGH, "Secret access key.");
+      .define(BASE_URL_CONFIG, ConfigDef.Type.STRING, ConfigDef.NO_DEFAULT_VALUE,
+          ConfigDef.Importance.HIGH,
+          "Ops API base URL up to /webhook/v1, with no trailing slash. POST /claim-check issues "
+              + "the upload URL.")
+      .define(USERNAME_CONFIG, ConfigDef.Type.STRING, ConfigDef.NO_DEFAULT_VALUE,
+          ConfigDef.Importance.HIGH, "Basic-auth username for the ops API.")
+      .define(PASSWORD_CONFIG, ConfigDef.Type.PASSWORD, ConfigDef.NO_DEFAULT_VALUE,
+          ConfigDef.Importance.HIGH, "Basic-auth password for the ops API.")
+      .define(CONNECT_TIMEOUT_CONFIG, ConfigDef.Type.INT, 3000, ConfigDef.Range.atLeast(1),
+          ConfigDef.Importance.LOW, "Connect timeout for the ops API call.")
+      .define(READ_TIMEOUT_CONFIG, ConfigDef.Type.INT, 5000, ConfigDef.Range.atLeast(1),
+          ConfigDef.Importance.LOW, "Read timeout for the ops API call.")
+      .define(UPLOAD_TIMEOUT_CONFIG, ConfigDef.Type.INT, 30_000, ConfigDef.Range.atLeast(1),
+          ConfigDef.Importance.LOW, "Timeout for uploading one body to the issued URL.");
 
   private static final ObjectMapper MAPPER = new ObjectMapper();
 
   private int largeBytes;
-  private String prefix;
   private BodyStore store;
 
   @Override
   public void configure(Map<String, ?> configs) {
     AbstractConfig config = new AbstractConfig(CONFIG_DEF, configs);
     largeBytes = config.getInt(LARGE_BYTES_CONFIG);
-    prefix = trimSlashes(config.getString(PREFIX_CONFIG));
     store = createStore(config);
     try {
-      store.put(prefix + "/" + PROBE_KEY, new byte[0]);
+      store.probe();
     } catch (IOException e) {
-      throw new ConnectException("Probe upload to s3://" + store.bucket() + "/" + prefix
-          + " failed, check the credential and bucket policy", e);
+      // The SMT runs in Confluent's function runtime and the worker rebuilds what it throws, so
+      // only JDK and Kafka classes may sit in the cause chain. RejectedException is ours.
+      throw new ConnectException("Could not get a claim-check upload URL from "
+          + config.getString(BASE_URL_CONFIG) + ", check the URL and the credential: "
+          + e.getMessage(), e instanceof BodyStore.RejectedException ? null : e);
     }
   }
 
   BodyStore createStore(AbstractConfig config) {
-    return new S3BodyStore(config.getString(BUCKET_CONFIG), config.getString(REGION_CONFIG),
-        config.getString(ACCESS_KEY_CONFIG), config.getPassword(SECRET_KEY_CONFIG).value());
+    return new ApiBodyStore(config.getString(BASE_URL_CONFIG), config.getString(USERNAME_CONFIG),
+        config.getPassword(PASSWORD_CONFIG).value(), config.getInt(CONNECT_TIMEOUT_CONFIG),
+        config.getInt(READ_TIMEOUT_CONFIG), config.getInt(UPLOAD_TIMEOUT_CONFIG));
   }
 
   @Override
@@ -99,11 +106,17 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
     }
     @SuppressWarnings("unchecked")
     Map<String, Object> map = (Map<String, Object>) plain;
-    String key = prefix + "/" + keyName(map.get("eventId"), body) + ".json";
+    String eventId = keyName(map.get("eventId"), body);
+    String dealerUuid = safe(map.get("dealerUuid"), UNKNOWN_DEALER);
+    BodyStore.Location location;
     try {
-      store.put(key, body);
+      location = store.put(eventId, dealerUuid, body);
+    } catch (BodyStore.RejectedException e) {
+      // No cause: the worker cannot load RejectedException, so it carries only its message.
+      throw new DataException("Claim-check upload rejected for event " + eventId + ": "
+          + e.getMessage());
     } catch (IOException e) {
-      throw new RetriableException("Claim-check upload failed for " + key, e);
+      throw new RetriableException("Claim-check upload failed for event " + eventId, e);
     }
     Map<String, Object> pointer = new LinkedHashMap<>();
     for (String field : ENVELOPE_FIELDS) {
@@ -112,17 +125,26 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
       }
     }
     Map<String, Object> claim = new LinkedHashMap<>();
-    claim.put("bucket", store.bucket());
-    claim.put("key", key);
+    claim.put("bucket", location.bucket);
+    claim.put("key", location.key);
     pointer.put(CLAIM_CHECK_FIELD, claim);
     return record.newRecord(record.topic(), record.kafkaPartition(), record.keySchema(),
         record.key(), null, pointer, record.timestamp(), record.headers());
   }
 
+  /** Limits a value to what the ops API accepts in an object key: 1-128 of A-Z a-z 0-9 . _ - */
+  static String safe(Object value, String fallback) {
+    String s = value == null ? "" : value.toString().replaceAll("[^A-Za-z0-9._-]", "_");
+    if (s.isEmpty()) {
+      return fallback;
+    }
+    return s.length() > 128 ? s.substring(0, 128) : s;
+  }
+
   /** The event id makes a retry overwrite the same object, a content hash covers records without one. */
   static String keyName(Object eventId, byte[] body) {
     if (eventId != null && !eventId.toString().isEmpty()) {
-      return eventId.toString().replaceAll("[^A-Za-z0-9._-]", "_");
+      return safe(eventId, "event");
     }
     try {
       byte[] digest = MessageDigest.getInstance("SHA-256").digest(body);
@@ -164,10 +186,6 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
       return java.util.Base64.getEncoder().encodeToString((byte[]) value);
     }
     return value;
-  }
-
-  private static String trimSlashes(String s) {
-    return s.replaceAll("^/+|/+$", "");
   }
 
   @Override
