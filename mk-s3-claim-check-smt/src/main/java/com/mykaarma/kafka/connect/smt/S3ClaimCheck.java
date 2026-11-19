@@ -153,13 +153,15 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
   /**
    * Turns a value into one key segment the ops API accepts: 1-128 of A-Z a-z 0-9 . _ -
    *
-   * Every non-empty value carries 12 hex characters of the SHA-256 of the original. Sanitizing and
-   * truncating can map distinct values to one string, and a retry overwrites the object at its key.
-   * Hashing only the values that changed leaves a gap: an unchanged value such as "a_b_c-0af99a609169"
-   * can equal the key generated for "a/b c". With the hash on every value, two different originals share
-   * a segment only if their SHA-256 prefixes match. The same input always gives the same segment, so
-   * retries stay idempotent. The fallback for an empty value has no hash, so it stays in a separate
-   * namespace: a value that is literally "unknown" becomes "unknown-<hash>".
+   * Every non-empty value carries the full SHA-256 of the original, 64 hex characters, after a readable
+   * prefix cut to fit the 128-character limit. Sanitizing and truncating can map distinct values to one
+   * string, and a retry overwrites the object at its key. Hashing only the values that changed leaves a
+   * gap: an unchanged value such as "a_b_c-<hash>" can equal the key generated for "a/b c". A shortened
+   * digest leaves another: two ids whose digests share a prefix collide once the readable part is cut.
+   * With the full digest on every value, two different originals share a segment only on a SHA-256
+   * collision. The same input always gives the same segment, so retries stay idempotent. The fallback for
+   * an empty value has no hash, so it stays in a separate namespace: a value that is literally "unknown"
+   * becomes "unknown-<hash>".
    */
   static String safe(Object value, String fallback) {
     String original = value == null ? "" : value.toString();
@@ -167,7 +169,7 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
     if (s.isEmpty()) {
       return fallback;
     }
-    String suffix = "-" + sha256Hex(codeUnits(original)).substring(0, 12);
+    String suffix = "-" + sha256Hex(codeUnits(original));
     int room = 128 - suffix.length();
     return (s.length() > room ? s.substring(0, room) : s) + suffix;
   }

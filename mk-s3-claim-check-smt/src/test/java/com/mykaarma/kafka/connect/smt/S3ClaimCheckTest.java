@@ -155,7 +155,7 @@ public class S3ClaimCheckTest {
     @SuppressWarnings("unchecked")
     Map<String, Object> claim = (Map<String, Object>) ((Map<String, Object>) out.value())
         .get("claimCheck");
-    assertTrue(claim.get("key").toString().matches("oversize/kafka-connect/[^/]+/d1-[0-9a-f]{12}/[0-9a-f]{64}\\.json"));
+    assertTrue(claim.get("key").toString().matches("oversize/kafka-connect/[^/]+/d1-[0-9a-f]{64}/[0-9a-f]{64}\\.json"));
   }
 
   @Test
@@ -218,7 +218,7 @@ public class S3ClaimCheckTest {
     assertEquals(1, store.objects.size());
     String key = store.objects.keySet().iterator().next();
     // Both ids changed, so each carries a hash of the original: 12 hex characters.
-    assertTrue(key, key.matches("oversize/kafka-connect/2026-11-17/\\.\\._x-[0-9a-f]{12}/a_b_c-[0-9a-f]{12}\\.json"));
+    assertTrue(key, key.matches("oversize/kafka-connect/2026-11-17/\\.\\._x-[0-9a-f]{64}/a_b_c-[0-9a-f]{64}\\.json"));
   }
 
   @Test
@@ -266,11 +266,11 @@ public class S3ClaimCheckTest {
   @Test
   public void everyValueCarriesAHashAndEmptyOnesFallBack() {
     assertTrue(S3ClaimCheck.safe("603588ac-c548-49bf-9248-14b899aaeec9", "event")
-        .matches("603588ac-c548-49bf-9248-14b899aaeec9-[0-9a-f]{12}"));
+        .matches("603588ac-c548-49bf-9248-14b899aaeec9-[0-9a-f]{64}"));
     assertEquals("unknown", S3ClaimCheck.safe(null, "unknown"));
     assertEquals("unknown", S3ClaimCheck.safe("", "unknown"));
     // The fallback is bare, so a value that is literally "unknown" cannot take its place.
-    assertTrue(S3ClaimCheck.safe("unknown", "unknown").matches("unknown-[0-9a-f]{12}"));
+    assertTrue(S3ClaimCheck.safe("unknown", "unknown").matches("unknown-[0-9a-f]{64}"));
   }
 
   /**
@@ -305,10 +305,22 @@ public class S3ClaimCheckTest {
     }
   }
 
+  /** Found by review: both ids start with the digest 69c16c8db1cf, and cutting the readable part makes the prefixes equal. */
+  @Test
+  public void idsWhoseDigestsShareAPrefixStayApartAfterTruncation() {
+    String a = "x".repeat(115) + "3993167";
+    String b = "x".repeat(115) + "16104942";
+    String segmentA = S3ClaimCheck.safe(a, "x");
+    String segmentB = S3ClaimCheck.safe(b, "x");
+    assertFalse(segmentA.equals(segmentB));
+    assertEquals(128, segmentA.length());
+    assertEquals(128, segmentB.length());
+  }
+
   @Test
   public void idsThatDifferOnlyByAnUnpairedSurrogateGetDifferentSegments() {
     assertFalse(S3ClaimCheck.safe("\uD800", "x").equals(S3ClaimCheck.safe("\uD801", "x")));
-    assertTrue(S3ClaimCheck.safe("\uD800", "x").matches("_-[0-9a-f]{12}"));
+    assertTrue(S3ClaimCheck.safe("\uD800", "x").matches("_-[0-9a-f]{64}"));
   }
 
   @Test
