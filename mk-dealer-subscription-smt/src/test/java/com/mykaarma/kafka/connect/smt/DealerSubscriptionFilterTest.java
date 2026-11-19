@@ -179,6 +179,29 @@ public class DealerSubscriptionFilterTest {
     assertEquals(before, snapshotCalls.get());
   }
 
+  /**
+   * UpdateTS has one-second resolution, so a second change inside the same second as a snapshot read
+   * leaves the version unchanged. A snapshot taken within RESOLUTION_SEC of its own version is
+   * reloaded on the next poll anyway, so that change is not missed.
+   */
+  @Test
+  public void aSnapshotTakenInTheSameSecondAsItsVersionReloadsEvenWhenTheVersionIsUnchanged() {
+    long now = System.currentTimeMillis() / 1000;
+    snapshotBody.set(snapshot(now,
+        "{\"eventType\":\"pointintime\",\"dataType\":\"CUSTOMER\",\"dealerUuid\":\"d1\"}"));
+    versionBody.set("{\"version\": " + now + "}");
+    smt.configure(config());
+    assertNull(smt.apply(record(event("d3", "CUSTOMER", "pointintime"))));
+
+    // A second subscription change in the same second: same version, one more key.
+    snapshotBody.set(snapshot(now,
+        "{\"eventType\":\"pointintime\",\"dataType\":\"CUSTOMER\",\"dealerUuid\":\"d1\"},"
+            + "{\"eventType\":\"pointintime\",\"dataType\":\"CUSTOMER\",\"dealerUuid\":\"d3\"}"));
+    smt.poll();
+
+    assertNotNull(smt.apply(record(event("d3", "CUSTOMER", "pointintime"))));
+  }
+
   @Test
   public void pollFailureKeepsCurrentSnapshot() {
     smt.configure(config());
