@@ -151,27 +151,21 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
   }
 
   /**
-   * Limits a value to what the ops API accepts in an object key: 1-128 of A-Z a-z 0-9 . _ -
-   * Sanitizing or truncating can map distinct values to one string, and a retry overwrites the object
-   * at its key, so a changed value gets a hash of the original appended. The same input still gives
-   * the same key, so retries stay idempotent.
+   * Turns a value into one key segment the ops API accepts: 1-128 of A-Z a-z 0-9 . _ -
+   *
+   * Every non-empty value carries 12 hex characters of the SHA-256 of the original. Sanitizing and
+   * truncating can map distinct values to one string, and a retry overwrites the object at its key.
+   * Hashing only the values that changed leaves a gap: an unchanged value such as "a_b_c-0af99a609169"
+   * can equal the key generated for "a/b c". With the hash on every value, two different originals share
+   * a segment only if their SHA-256 prefixes match. The same input always gives the same segment, so
+   * retries stay idempotent. The fallback for an empty value has no hash, so it stays in a separate
+   * namespace: a value that is literally "unknown" becomes "unknown-<hash>".
    */
   static String safe(Object value, String fallback) {
-    return safe(value, fallback, false);
-  }
-
-  /**
-   * With alwaysHash, every non-empty value carries the hash, changed or not. Otherwise an unchanged
-   * value such as "a_b_c-0af99a609169" could equal the key generated for "a/b c" and overwrite it.
-   */
-  static String safe(Object value, String fallback, boolean alwaysHash) {
     String original = value == null ? "" : value.toString();
     String s = original.replaceAll("[^A-Za-z0-9._-]", "_");
     if (s.isEmpty()) {
       return fallback;
-    }
-    if (!alwaysHash && s.equals(original) && s.length() <= 128) {
-      return s;
     }
     String suffix = "-" + sha256Hex(original.getBytes(StandardCharsets.UTF_8)).substring(0, 12);
     int room = 128 - suffix.length();
@@ -194,7 +188,7 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
   /** The event id makes a retry overwrite the same object, a content hash covers records without one. */
   static String keyName(Object eventId, byte[] body) {
     if (eventId != null && !eventId.toString().isEmpty()) {
-      return safe(eventId, "event", true);
+      return safe(eventId, "event");
     }
     return sha256Hex(body);
   }

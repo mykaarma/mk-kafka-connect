@@ -90,9 +90,10 @@ public class S3ClaimCheckTest {
     return c;
   }
 
-  /** The key the SMT builds for an event id. Every event id carries a hash of the original. */
+  /** The key the SMT builds: the dealer and the event id each carry a hash of the original. A missing dealer is the bare fallback. */
   private static String keyFor(String dealer, String eventId) {
-    return "oversize/kafka-connect/2026-11-17/" + dealer + "/" + S3ClaimCheck.keyName(eventId, new byte[0]) + ".json";
+    String dealerSegment = dealer == null ? "unknown" : S3ClaimCheck.safe(dealer, "unknown");
+    return "oversize/kafka-connect/2026-11-17/" + dealerSegment + "/" + S3ClaimCheck.keyName(eventId, new byte[0]) + ".json";
   }
 
   private static SinkRecord record(Object value) {
@@ -153,7 +154,7 @@ public class S3ClaimCheckTest {
     @SuppressWarnings("unchecked")
     Map<String, Object> claim = (Map<String, Object>) ((Map<String, Object>) out.value())
         .get("claimCheck");
-    assertTrue(claim.get("key").toString().matches("oversize/kafka-connect/[^/]+/d1/[0-9a-f]{64}\\.json"));
+    assertTrue(claim.get("key").toString().matches("oversize/kafka-connect/[^/]+/d1-[0-9a-f]{12}/[0-9a-f]{64}\\.json"));
   }
 
   @Test
@@ -262,11 +263,55 @@ public class S3ClaimCheckTest {
   }
 
   @Test
-  public void safeIdsAreLeftAlone() {
-    assertEquals("603588ac-c548-49bf-9248-14b899aaeec9",
-        S3ClaimCheck.safe("603588ac-c548-49bf-9248-14b899aaeec9", "event"));
+  public void everyValueCarriesAHashAndEmptyOnesFallBack() {
+    assertTrue(S3ClaimCheck.safe("603588ac-c548-49bf-9248-14b899aaeec9", "event")
+        .matches("603588ac-c548-49bf-9248-14b899aaeec9-[0-9a-f]{12}"));
     assertEquals("unknown", S3ClaimCheck.safe(null, "unknown"));
     assertEquals("unknown", S3ClaimCheck.safe("", "unknown"));
+    // The fallback is bare, so a value that is literally "unknown" cannot take its place.
+    assertTrue(S3ClaimCheck.safe("unknown", "unknown").matches("unknown-[0-9a-f]{12}"));
+  }
+
+  /**
+   * The key must be an injective function of the original (dealer, event id) pair. Cross values that
+   * sanitize to the same string, values that look like generated segments, the fallbacks, a value that
+   * needs truncating at either end, and plain ids: every pair gets its own object.
+   */
+  @Test
+  public void everyDistinctDealerAndEventIdPairGetsItsOwnKey() {
+    smt.configure(config());
+    String generatedLooking = S3ClaimCheck.safe("a/b c", "x");
+    java.util.List<String> values = java.util.Arrays.asList(
+        "a/b c", "a_b_c", "a b c", generatedLooking, "unknown", "event", "e1", "e1 ", "e1-",
+        "x".repeat(200) + "-one", "x".repeat(200) + "-two", "x".repeat(128), "x".repeat(129),
+        "603588ac-c548-49bf-9248-14b899aaeec9");
+    int pairs = 0;
+    for (String dealer : values) {
+      for (String id : values) {
+        Map<String, Object> e = event(id, 500);
+        e.put("dealerUuid", dealer);
+        smt.apply(record(e));
+        pairs++;
+      }
+    }
+    assertEquals(pairs, store.objects.size());
+    for (String key : store.objects.keySet()) {
+      for (String segment : key.substring("oversize/kafka-connect/2026-11-17/".length()).split("/")) {
+        assertTrue(segment, segment.length() <= 128 + ".json".length());
+      }
+    }
+  }
+
+  @Test
+  public void dealersThatSanitizeToTheSameStringStayApart() {
+    smt.configure(config());
+    Map<String, Object> a = event("e1", 500);
+    a.put("dealerUuid", "a/b c");
+    Map<String, Object> b = event("e1", 500);
+    b.put("dealerUuid", S3ClaimCheck.safe("a/b c", "unknown")); // looks like the generated segment
+    smt.apply(record(a));
+    smt.apply(record(b));
+    assertEquals(2, store.objects.size());
   }
 
   @Test
@@ -275,7 +320,7 @@ public class S3ClaimCheckTest {
     Map<String, Object> e = event("e1", 500);
     e.remove("dealerUuid");
     smt.apply(record(e));
-    assertTrue(store.objects.containsKey(keyFor("unknown", "e1")));
+    assertTrue(store.objects.containsKey(keyFor(null, "e1")));
   }
 
   /** A shaded Jackson exception: the worker cannot rebuild it, so it must not leave the SMT. */
