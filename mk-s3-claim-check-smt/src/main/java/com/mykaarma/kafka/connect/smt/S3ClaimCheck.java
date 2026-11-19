@@ -150,22 +150,29 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
     return e;
   }
 
-  /** Limits a value to what the ops API accepts in an object key: 1-128 of A-Z a-z 0-9 . _ - */
+  /**
+   * Limits a value to what the ops API accepts in an object key: 1-128 of A-Z a-z 0-9 . _ -
+   * Sanitizing or truncating can map distinct values to one string, and a retry overwrites the object
+   * at its key, so a changed value gets a hash of the original appended. The same input still gives
+   * the same key, so retries stay idempotent.
+   */
   static String safe(Object value, String fallback) {
-    String s = value == null ? "" : value.toString().replaceAll("[^A-Za-z0-9._-]", "_");
+    String original = value == null ? "" : value.toString();
+    String s = original.replaceAll("[^A-Za-z0-9._-]", "_");
     if (s.isEmpty()) {
       return fallback;
     }
-    return s.length() > 128 ? s.substring(0, 128) : s;
+    if (s.equals(original) && s.length() <= 128) {
+      return s;
+    }
+    String suffix = "-" + sha256Hex(original.getBytes(StandardCharsets.UTF_8)).substring(0, 12);
+    int room = 128 - suffix.length();
+    return (s.length() > room ? s.substring(0, room) : s) + suffix;
   }
 
-  /** The event id makes a retry overwrite the same object, a content hash covers records without one. */
-  static String keyName(Object eventId, byte[] body) {
-    if (eventId != null && !eventId.toString().isEmpty()) {
-      return safe(eventId, "event");
-    }
+  private static String sha256Hex(byte[] bytes) {
     try {
-      byte[] digest = MessageDigest.getInstance("SHA-256").digest(body);
+      byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
       StringBuilder hex = new StringBuilder();
       for (byte b : digest) {
         hex.append(String.format("%02x", b));
@@ -174,6 +181,14 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
     } catch (NoSuchAlgorithmException e) {
       throw new IllegalStateException(e);
     }
+  }
+
+  /** The event id makes a retry overwrite the same object, a content hash covers records without one. */
+  static String keyName(Object eventId, byte[] body) {
+    if (eventId != null && !eventId.toString().isEmpty()) {
+      return safe(eventId, "event");
+    }
+    return sha256Hex(body);
   }
 
   /** Converts a Struct tree to plain Maps and Lists. Maps and scalars pass through. */

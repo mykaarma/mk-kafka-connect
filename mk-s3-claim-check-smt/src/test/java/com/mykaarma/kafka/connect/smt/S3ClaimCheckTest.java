@@ -208,7 +208,49 @@ public class S3ClaimCheckTest {
     Map<String, Object> e = event("a/b c", 500);
     e.put("dealerUuid", "../x");
     smt.apply(record(e));
-    assertTrue(store.objects.containsKey("oversize/kafka-connect/2026-11-17/.._x/a_b_c.json"));
+    assertEquals(1, store.objects.size());
+    String key = store.objects.keySet().iterator().next();
+    // Both ids changed, so each carries a hash of the original: 12 hex characters.
+    assertTrue(key, key.matches("oversize/kafka-connect/2026-11-17/\\.\\._x-[0-9a-f]{12}/a_b_c-[0-9a-f]{12}\\.json"));
+  }
+
+  @Test
+  public void idsThatSanitizeToTheSameStringStayApart() {
+    smt.configure(config());
+    smt.apply(record(event("a/b c", 500)));
+    smt.apply(record(event("a_b_c", 500)));
+    // A retry overwrites the object at its key, so two ids must not share one.
+    assertEquals(2, store.objects.size());
+    assertTrue(store.objects.containsKey("oversize/kafka-connect/2026-11-17/d1/a_b_c.json"));
+  }
+
+  @Test
+  public void aRetryOfAnUnsafeIdStillLandsOnTheSameKey() {
+    smt.configure(config());
+    smt.apply(record(event("a/b c", 500)));
+    smt.apply(record(event("a/b c", 500)));
+    assertEquals(1, store.objects.size());
+  }
+
+  @Test
+  public void longIdsAreTruncatedWithoutCollidingOrExceedingTheLimit() {
+    smt.configure(config());
+    String prefix = "x".repeat(200);
+    smt.apply(record(event(prefix + "-one", 500)));
+    smt.apply(record(event(prefix + "-two", 500)));
+    assertEquals(2, store.objects.size());
+    for (String key : store.objects.keySet()) {
+      String id = key.substring(key.lastIndexOf('/') + 1, key.length() - ".json".length());
+      assertTrue(id, id.length() <= 128);
+    }
+  }
+
+  @Test
+  public void safeIdsAreLeftAlone() {
+    assertEquals("603588ac-c548-49bf-9248-14b899aaeec9",
+        S3ClaimCheck.safe("603588ac-c548-49bf-9248-14b899aaeec9", "event"));
+    assertEquals("unknown", S3ClaimCheck.safe(null, "unknown"));
+    assertEquals("unknown", S3ClaimCheck.safe("", "unknown"));
   }
 
   @Test
