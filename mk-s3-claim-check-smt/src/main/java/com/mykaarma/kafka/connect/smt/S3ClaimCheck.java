@@ -157,12 +157,20 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
    * the same key, so retries stay idempotent.
    */
   static String safe(Object value, String fallback) {
+    return safe(value, fallback, false);
+  }
+
+  /**
+   * With alwaysHash, every non-empty value carries the hash, changed or not. Otherwise an unchanged
+   * value such as "a_b_c-0af99a609169" could equal the key generated for "a/b c" and overwrite it.
+   */
+  static String safe(Object value, String fallback, boolean alwaysHash) {
     String original = value == null ? "" : value.toString();
     String s = original.replaceAll("[^A-Za-z0-9._-]", "_");
     if (s.isEmpty()) {
       return fallback;
     }
-    if (s.equals(original) && s.length() <= 128) {
+    if (!alwaysHash && s.equals(original) && s.length() <= 128) {
       return s;
     }
     String suffix = "-" + sha256Hex(original.getBytes(StandardCharsets.UTF_8)).substring(0, 12);
@@ -186,7 +194,7 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
   /** The event id makes a retry overwrite the same object, a content hash covers records without one. */
   static String keyName(Object eventId, byte[] body) {
     if (eventId != null && !eventId.toString().isEmpty()) {
-      return safe(eventId, "event");
+      return safe(eventId, "event", true);
     }
     return sha256Hex(body);
   }

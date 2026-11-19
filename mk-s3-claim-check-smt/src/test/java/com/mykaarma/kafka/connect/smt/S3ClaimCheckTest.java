@@ -90,6 +90,11 @@ public class S3ClaimCheckTest {
     return c;
   }
 
+  /** The key the SMT builds for an event id. Every event id carries a hash of the original. */
+  private static String keyFor(String dealer, String eventId) {
+    return "oversize/kafka-connect/2026-11-17/" + dealer + "/" + S3ClaimCheck.keyName(eventId, new byte[0]) + ".json";
+  }
+
   private static SinkRecord record(Object value) {
     return new SinkRecord("topic", 0, null, null, null, value, 0);
   }
@@ -126,7 +131,7 @@ public class S3ClaimCheckTest {
     @SuppressWarnings("unchecked")
     Map<String, Object> claim = (Map<String, Object>) pointer.get("claimCheck");
     assertEquals("claims", claim.get("bucket"));
-    String key = "oversize/kafka-connect/2026-11-17/d1/e1.json";
+    String key = keyFor("d1", "e1");
     assertEquals(key, claim.get("key"));
     assertTrue(new String(store.objects.get(key)).contains("xxxxxxxx"));
   }
@@ -160,7 +165,7 @@ public class S3ClaimCheckTest {
         .put("payload", "y".repeat(500));
     SinkRecord out = smt.apply(record(s));
     assertNull(out.valueSchema());
-    assertTrue(store.objects.containsKey("oversize/kafka-connect/2026-11-17/d1/e9.json"));
+    assertTrue(store.objects.containsKey(keyFor("d1", "e9")));
   }
 
   @Test
@@ -221,7 +226,18 @@ public class S3ClaimCheckTest {
     smt.apply(record(event("a_b_c", 500)));
     // A retry overwrites the object at its key, so two ids must not share one.
     assertEquals(2, store.objects.size());
-    assertTrue(store.objects.containsKey("oversize/kafka-connect/2026-11-17/d1/a_b_c.json"));
+    assertTrue(store.objects.containsKey(keyFor("d1", "a/b c")));
+    assertTrue(store.objects.containsKey(keyFor("d1", "a_b_c")));
+  }
+
+  @Test
+  public void anIdThatLooksLikeAGeneratedKeyCannotTakeItsPlace() {
+    smt.configure(config());
+    String generated = S3ClaimCheck.keyName("a/b c", new byte[0]); // a_b_c-<12 hex>
+    smt.apply(record(event("a/b c", 500)));
+    smt.apply(record(event(generated, 500)));
+    // An unchanged id used to pass through as itself, which here equals the first event's key.
+    assertEquals(2, store.objects.size());
   }
 
   @Test
@@ -259,7 +275,7 @@ public class S3ClaimCheckTest {
     Map<String, Object> e = event("e1", 500);
     e.remove("dealerUuid");
     smt.apply(record(e));
-    assertTrue(store.objects.containsKey("oversize/kafka-connect/2026-11-17/unknown/e1.json"));
+    assertTrue(store.objects.containsKey(keyFor("unknown", "e1")));
   }
 
   /** A shaded Jackson exception: the worker cannot rebuild it, so it must not leave the SMT. */
