@@ -1,6 +1,7 @@
 package com.mykaarma.kafka.connect.smt;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
@@ -284,7 +285,9 @@ public class S3ClaimCheckTest {
     java.util.List<String> values = java.util.Arrays.asList(
         "a/b c", "a_b_c", "a b c", generatedLooking, "unknown", "event", "e1", "e1 ", "e1-",
         "x".repeat(200) + "-one", "x".repeat(200) + "-two", "x".repeat(128), "x".repeat(129),
-        "603588ac-c548-49bf-9248-14b899aaeec9");
+        "603588ac-c548-49bf-9248-14b899aaeec9",
+        // Unpaired surrogates are distinct strings, though getBytes(UTF_8) turns each into "?".
+        "\uD800", "\uD801", "a\uD800", "a\uD801");
     int pairs = 0;
     for (String dealer : values) {
       for (String id : values) {
@@ -300,6 +303,12 @@ public class S3ClaimCheckTest {
         assertTrue(segment, segment.length() <= 128 + ".json".length());
       }
     }
+  }
+
+  @Test
+  public void idsThatDifferOnlyByAnUnpairedSurrogateGetDifferentSegments() {
+    assertFalse(S3ClaimCheck.safe("\uD800", "x").equals(S3ClaimCheck.safe("\uD801", "x")));
+    assertTrue(S3ClaimCheck.safe("\uD800", "x").matches("_-[0-9a-f]{12}"));
   }
 
   @Test

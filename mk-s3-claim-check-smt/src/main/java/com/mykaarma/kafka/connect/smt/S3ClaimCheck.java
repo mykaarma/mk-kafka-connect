@@ -167,9 +167,23 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
     if (s.isEmpty()) {
       return fallback;
     }
-    String suffix = "-" + sha256Hex(original.getBytes(StandardCharsets.UTF_8)).substring(0, 12);
+    String suffix = "-" + sha256Hex(codeUnits(original)).substring(0, 12);
     int room = 128 - suffix.length();
     return (s.length() > room ? s.substring(0, room) : s) + suffix;
+  }
+
+  /**
+   * The string's UTF-16 code units, two bytes each. Unlike getBytes(UTF_8), this keeps an unpaired
+   * surrogate as it is: getBytes turns each into "?", so "\uD800" and "\uD801" would hash alike.
+   */
+  static byte[] codeUnits(String value) {
+    byte[] out = new byte[value.length() * 2];
+    for (int i = 0; i < value.length(); i++) {
+      char c = value.charAt(i);
+      out[2 * i] = (byte) (c >> 8);
+      out[2 * i + 1] = (byte) c;
+    }
+    return out;
   }
 
   private static String sha256Hex(byte[] bytes) {
