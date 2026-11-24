@@ -38,6 +38,7 @@ public class DealerSubscriptionFilter<R extends ConnectRecord<R>> implements Tra
   public static final String CONNECT_TIMEOUT_CONFIG = "http.connect.timeout.ms";
   public static final String READ_TIMEOUT_CONFIG = "http.read.timeout.ms";
   public static final String MODE_CONFIG = "mode";
+  public static final String TIMING_WINDOW_CONFIG = "timing.log.interval.ms";
 
   static final String DEFAULT_EVENT_TYPE = "pointintime";
   /** A second change inside the same second as a read does not move the version. */
@@ -65,7 +66,10 @@ public class DealerSubscriptionFilter<R extends ConnectRecord<R>> implements Tra
           "HTTP read timeout.")
       .define(MODE_CONFIG, ConfigDef.Type.STRING, "enforce",
           ConfigDef.ValidString.in("enforce", "shadow"), ConfigDef.Importance.MEDIUM,
-          "enforce drops unsubscribed records. shadow never drops and logs the decision.");
+          "enforce drops unsubscribed records. shadow never drops and logs the decision.")
+      .define(TIMING_WINDOW_CONFIG, ConfigDef.Type.LONG, 60_000L, ConfigDef.Range.atLeast(0),
+          ConfigDef.Importance.LOW,
+          "Window of the apply() timing summary line in the log. 0 turns the timing off.");
 
   private String dealerField;
   private String dataTypeField;
@@ -74,6 +78,7 @@ public class DealerSubscriptionFilter<R extends ConnectRecord<R>> implements Tra
   private SubscriptionClient client;
   private volatile SubscriptionClient.Snapshot snapshot;
   private ScheduledExecutorService poller;
+  private ApplyTiming timing;
 
   @Override
   public void configure(Map<String, ?> configs) {
@@ -82,10 +87,13 @@ public class DealerSubscriptionFilter<R extends ConnectRecord<R>> implements Tra
     dataTypeField = config.getString(DATA_TYPE_FIELD_CONFIG);
     eventTypeField = config.getString(EVENT_TYPE_FIELD_CONFIG);
     shadow = "shadow".equals(config.getString(MODE_CONFIG));
+    timing = new ApplyTiming("dealer-subscription", config.getLong(TIMING_WINDOW_CONFIG),
+        System::nanoTime, LOG::info);
     Password password = config.getPassword(PASSWORD_CONFIG);
     client = new SubscriptionClient(config.getString(BASE_URL_CONFIG),
         config.getString(USERNAME_CONFIG), password.value(),
         config.getInt(CONNECT_TIMEOUT_CONFIG), config.getInt(READ_TIMEOUT_CONFIG));
+    long loadStart = System.nanoTime();
     try {
       snapshot = client.snapshot();
     } catch (IOException e) {
@@ -94,8 +102,8 @@ public class DealerSubscriptionFilter<R extends ConnectRecord<R>> implements Tra
       throw new ConnectException("Could not load the initial subscription snapshot: "
           + e.getMessage(), e);
     }
-    LOG.info("Loaded subscription snapshot version {} with {} keys", snapshot.version,
-        snapshot.keys.size());
+    LOG.info("Loaded subscription snapshot version {} with {} keys, snapshot_ms={}",
+        snapshot.version, snapshot.keys.size(), (System.nanoTime() - loadStart) / 1_000_000);
     long interval = config.getLong(POLL_INTERVAL_CONFIG);
     poller = Executors.newSingleThreadScheduledExecutor(r -> {
       Thread t = new Thread(r, "dealer-subscription-poller");
@@ -109,12 +117,18 @@ public class DealerSubscriptionFilter<R extends ConnectRecord<R>> implements Tra
   void poll() {
     try {
       SubscriptionClient.Snapshot current = snapshot;
+      long t0 = System.nanoTime();
       long version = client.version();
+      long versionMs = (System.nanoTime() - t0) / 1_000_000;
       boolean inWindow = current.loadedAtEpochSec - current.version <= RESOLUTION_SEC;
       if (version != current.version || inWindow) {
+        long t1 = System.nanoTime();
         snapshot = client.snapshot();
-        LOG.info("Reloaded subscription snapshot version {} with {} keys", snapshot.version,
-            snapshot.keys.size());
+        LOG.info("Reloaded subscription snapshot version {} with {} keys, version_ms={} "
+            + "snapshot_ms={}", snapshot.version, snapshot.keys.size(), versionMs,
+            (System.nanoTime() - t1) / 1_000_000);
+      } else {
+        LOG.info("Subscription poll: version {} unchanged, version_ms={}", version, versionMs);
       }
     } catch (IOException | RuntimeException e) {
       LOG.warn("Subscription poll failed, keeping the current snapshot: {}", e.toString());
@@ -123,6 +137,18 @@ public class DealerSubscriptionFilter<R extends ConnectRecord<R>> implements Tra
 
   @Override
   public R apply(R record) {
+    if (!timing.enabled()) {
+      return filter(record);
+    }
+    long started = timing.start();
+    try {
+      return filter(record);
+    } finally {
+      timing.end(started);
+    }
+  }
+
+  private R filter(R record) {
     Object value = record.value();
     if (value == null) {
       return record;
