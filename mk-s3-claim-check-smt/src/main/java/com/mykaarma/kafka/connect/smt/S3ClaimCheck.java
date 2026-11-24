@@ -15,9 +15,7 @@ import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.connect.connector.ConnectRecord;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.DataException;
-import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.transforms.Transformation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,6 +26,11 @@ import org.slf4j.LoggerFactory;
  *
  * <p>The pointer record is a schemaless Map holding the envelope fields plus
  * claimCheck: {bucket, key}.
+ *
+ * <p>When the ops API cannot be reached, an oversized record throws a DataException instead of
+ * blocking: with errors.tolerance=all the connector sends it to its dead-letter topic and carries on.
+ * After a failed call the SMT refuses oversized records at once for a cool-down, so a dead API does
+ * not cost a full timeout per record. Records under the limit never touch the API.
  */
 public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<R> {
 
@@ -39,6 +42,7 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
   public static final String READ_TIMEOUT_CONFIG = "http.read.timeout.ms";
   public static final String UPLOAD_TIMEOUT_CONFIG = "http.upload.timeout.ms";
   public static final String TIMING_WINDOW_CONFIG = "timing.log.interval.ms";
+  public static final String COOLDOWN_CONFIG = "ops.api.cooldown.ms";
 
   static final String CLAIM_CHECK_FIELD = "claimCheck";
   static final String UNKNOWN_DEALER = "unknown";
@@ -63,6 +67,9 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
           ConfigDef.Importance.LOW, "Read timeout for the ops API call.")
       .define(UPLOAD_TIMEOUT_CONFIG, ConfigDef.Type.INT, 30_000, ConfigDef.Range.atLeast(1),
           ConfigDef.Importance.LOW, "Timeout for uploading one body to the issued URL.")
+      .define(COOLDOWN_CONFIG, ConfigDef.Type.LONG, 30_000L, ConfigDef.Range.atLeast(0),
+          ConfigDef.Importance.LOW,
+          "After a failed ops API call, oversized records fail at once for this long. 0 turns it off.")
       .define(TIMING_WINDOW_CONFIG, ConfigDef.Type.LONG, 60_000L, ConfigDef.Range.atLeast(0),
           ConfigDef.Importance.LOW,
           "Window of the apply() timing summary line in the log. 0 turns the timing off.");
@@ -73,6 +80,10 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
   private int largeBytes;
   private BodyStore store;
   private ApplyTiming timing;
+  private long cooldownNanos;
+  /** System.nanoTime() before which oversized records fail without calling the API. */
+  private long refuseUntilNanos;
+  private boolean refusing;
 
   @Override
   public void configure(Map<String, ?> configs) {
@@ -80,13 +91,15 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
     largeBytes = config.getInt(LARGE_BYTES_CONFIG);
     timing = new ApplyTiming("s3-claim-check", config.getLong(TIMING_WINDOW_CONFIG),
         System::nanoTime, LOG::info);
+    cooldownNanos = config.getLong(COOLDOWN_CONFIG) * 1_000_000L;
     store = createStore(config);
     try {
       store.probe();
     } catch (IOException e) {
-      throw new ConnectException("Could not get a claim-check upload URL from "
-          + config.getString(BASE_URL_CONFIG) + ", check the URL and the credential: "
-          + e.getMessage(), safeCause(e));
+      // An outage must not keep the connector from starting: records under the limit never use the
+      // API. A wrong URL or credential shows up as a failed oversized record instead.
+      LOG.warn("Could not get a claim-check upload URL from {}, oversized records will fail "
+          + "until it answers: {}", config.getString(BASE_URL_CONFIG), e.getMessage());
     }
   }
 
@@ -130,15 +143,25 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
     Map<String, Object> map = (Map<String, Object>) plain;
     String eventId = keyName(map.get("eventId"), body);
     String dealerUuid = safe(map.get("dealerUuid"), UNKNOWN_DEALER);
+    if (refusing && System.nanoTime() - refuseUntilNanos < 0) {
+      throw new DataException("Claim-check skipped for event " + eventId
+          + ": the ops API failed a moment ago");
+    }
     BodyStore.Location location;
     try {
       location = store.put(eventId, dealerUuid, body);
+      refusing = false;
     } catch (BodyStore.RejectedException e) {
       // No cause: the worker cannot load RejectedException, so it carries only its message.
       throw new DataException("Claim-check upload rejected for event " + eventId + ": "
           + e.getMessage());
     } catch (IOException e) {
-      throw new RetriableException("Claim-check upload failed for event " + eventId + ": "
+      if (cooldownNanos > 0) {
+        refusing = true;
+        refuseUntilNanos = System.nanoTime() + cooldownNanos;
+      }
+      // Not retriable: a retry would hold the partition. The connector's dead-letter topic takes it.
+      throw new DataException("Claim-check upload failed for event " + eventId + ": "
           + e.getMessage(), safeCause(e));
     }
     Map<String, Object> pointer = new LinkedHashMap<>();

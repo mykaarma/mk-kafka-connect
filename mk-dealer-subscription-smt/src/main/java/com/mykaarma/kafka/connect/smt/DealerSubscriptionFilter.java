@@ -10,7 +10,6 @@ import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.types.Password;
 import org.apache.kafka.connect.connector.ConnectRecord;
 import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.DataException;
 import org.apache.kafka.connect.transforms.Transformation;
 import org.slf4j.Logger;
@@ -21,8 +20,12 @@ import org.slf4j.LoggerFactory;
  * Filter$Value dealer arrays. Holds a snapshot of every active (eventType, dataType,
  * dealerUuid) key from the ops API and reloads it when the subscription version moves.
  *
- * <p>POC scope: snapshot lookup only. The per-key check route and key cache fallback from the
- * design are not implemented yet, so configure() throws if the first snapshot cannot load.
+ * <p>When the ops API cannot be reached the filter fails open: it passes every record, and the
+ * filtering Lambda, which checks subscriptions itself, does the real filtering. That covers a start-up
+ * with no snapshot and any failed poll, so a subscription added during an outage is never dropped. It
+ * filters again after the next successful load.
+ *
+ * <p>POC scope: snapshot lookup only. The per-key check route is not used.
  */
 public class DealerSubscriptionFilter<R extends ConnectRecord<R>> implements Transformation<R> {
 
@@ -76,7 +79,10 @@ public class DealerSubscriptionFilter<R extends ConnectRecord<R>> implements Tra
   private String eventTypeField;
   private boolean shadow;
   private SubscriptionClient client;
+  /** Null until the first load succeeds. */
   private volatile SubscriptionClient.Snapshot snapshot;
+  /** True while the last load or poll failed: records pass unfiltered. */
+  private volatile boolean failOpen;
   private ScheduledExecutorService poller;
   private ApplyTiming timing;
 
@@ -96,14 +102,11 @@ public class DealerSubscriptionFilter<R extends ConnectRecord<R>> implements Tra
     long loadStart = System.nanoTime();
     try {
       snapshot = client.snapshot();
-    } catch (IOException e) {
-      // SubscriptionClient throws only JDK exceptions, which the worker can rebuild; the reason
-      // goes in the message too, since a cause that cannot be rebuilt would hide it.
-      throw new ConnectException("Could not load the initial subscription snapshot: "
-          + e.getMessage(), e);
+      LOG.info("Loaded subscription snapshot version {} with {} keys, snapshot_ms={}",
+          snapshot.version, snapshot.keys.size(), (System.nanoTime() - loadStart) / 1_000_000);
+    } catch (IOException | RuntimeException e) {
+      enterFailOpen(e);
     }
-    LOG.info("Loaded subscription snapshot version {} with {} keys, snapshot_ms={}",
-        snapshot.version, snapshot.keys.size(), (System.nanoTime() - loadStart) / 1_000_000);
     long interval = config.getLong(POLL_INTERVAL_CONFIG);
     poller = Executors.newSingleThreadScheduledExecutor(r -> {
       Thread t = new Thread(r, "dealer-subscription-poller");
@@ -120,8 +123,8 @@ public class DealerSubscriptionFilter<R extends ConnectRecord<R>> implements Tra
       long t0 = System.nanoTime();
       long version = client.version();
       long versionMs = (System.nanoTime() - t0) / 1_000_000;
-      boolean inWindow = current.loadedAtEpochSec - current.version <= RESOLUTION_SEC;
-      if (version != current.version || inWindow) {
+      boolean inWindow = current != null && current.loadedAtEpochSec - current.version <= RESOLUTION_SEC;
+      if (current == null || version != current.version || inWindow) {
         long t1 = System.nanoTime();
         snapshot = client.snapshot();
         LOG.info("Reloaded subscription snapshot version {} with {} keys, version_ms={} "
@@ -130,8 +133,20 @@ public class DealerSubscriptionFilter<R extends ConnectRecord<R>> implements Tra
       } else {
         LOG.info("Subscription poll: version {} unchanged, version_ms={}", version, versionMs);
       }
+      if (failOpen) {
+        failOpen = false;
+        LOG.info("Subscription API reachable again, filtering resumed");
+      }
     } catch (IOException | RuntimeException e) {
-      LOG.warn("Subscription poll failed, keeping the current snapshot: {}", e.toString());
+      enterFailOpen(e);
+    }
+  }
+
+  private void enterFailOpen(Exception e) {
+    if (!failOpen) {
+      failOpen = true;
+      LOG.warn("Subscription API unavailable, passing every record until it answers: {}",
+          e.toString());
     }
   }
 
@@ -150,7 +165,8 @@ public class DealerSubscriptionFilter<R extends ConnectRecord<R>> implements Tra
 
   private R filter(R record) {
     Object value = record.value();
-    if (value == null) {
+    SubscriptionClient.Snapshot current = snapshot;
+    if (value == null || failOpen || current == null) {
       return record;
     }
     String dealer = text(value, dealerField);
@@ -160,7 +176,7 @@ public class DealerSubscriptionFilter<R extends ConnectRecord<R>> implements Tra
       eventType = DEFAULT_EVENT_TYPE;
     }
     boolean subscribed = dealer != null && dataType != null
-        && snapshot.keys.contains(SubscriptionClient.key(eventType, dataType, dealer));
+        && current.keys.contains(SubscriptionClient.key(eventType, dataType, dealer));
     if (subscribed) {
       return record;
     }

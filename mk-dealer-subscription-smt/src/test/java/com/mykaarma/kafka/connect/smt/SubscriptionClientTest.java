@@ -9,9 +9,6 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
-import java.util.Map;
-import org.apache.kafka.connect.errors.ConnectException;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -65,22 +62,16 @@ public class SubscriptionClientTest {
   }
 
   @Test
-  public void malformedSnapshotAtStartupFailsWithTheReasonAndNoJacksonCause() {
+  public void malformedSnapshotFailsWithTheReasonAndNoJacksonCause() {
     body = "{\"version\": not json";
-    Map<String, Object> config = new HashMap<>();
-    config.put("ops.api.base.url", base);
-    config.put("ops.api.username", "user");
-    config.put("ops.api.password", "pass");
-    DealerSubscriptionFilter<org.apache.kafka.connect.sink.SinkRecord> smt =
-        new DealerSubscriptionFilter<>();
     try {
-      smt.configure(config);
+      client().snapshot();
       fail();
-    } catch (ConnectException e) {
+    } catch (IOException e) {
       assertTrue(e.getMessage().contains("malformed JSON"));
-      for (Throwable t = e.getCause(); t != null; t = t.getCause()) {
-        assertTrue("foreign class in the cause chain: " + t.getClass(),
-            t.getClass().getName().startsWith("java."));
+      for (Throwable c = e.getCause(); c != null; c = c.getCause()) {
+        assertTrue("foreign class in the cause chain: " + c.getClass(),
+            c.getClass().getName().startsWith("java."));
       }
     }
   }

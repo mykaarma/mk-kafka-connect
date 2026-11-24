@@ -2,6 +2,7 @@ package com.mykaarma.kafka.connect.smt;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
@@ -16,9 +17,7 @@ import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.DataException;
-import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.junit.Before;
 import org.junit.Test;
@@ -177,11 +176,54 @@ public class S3ClaimCheckTest {
     assertSame(r, smt.apply(r));
   }
 
-  @Test(expected = RetriableException.class)
-  public void uploadFailureIsRetriable() {
+  @Test(expected = DataException.class)
+  public void uploadFailureIsNotRetriable() {
     smt.configure(config());
     store.fail = true;
     smt.apply(record(event("e1", 500)));
+  }
+
+  @Test
+  public void afterAFailureOversizedRecordsFailAtOnceForTheCooldown() {
+    smt.configure(config("ops.api.cooldown.ms", "60000"));
+    store.fail = true;
+    try {
+      smt.apply(record(event("e1", 500)));
+      fail();
+    } catch (DataException e) {
+      assertTrue(e.getMessage().contains("upload failed"));
+    }
+    store.fail = false;
+    try {
+      smt.apply(record(event("e2", 500)));
+      fail();
+    } catch (DataException e) {
+      assertTrue(e.getMessage().contains("failed a moment ago"));
+    }
+    assertTrue(store.objects.isEmpty());
+  }
+
+  @Test
+  public void withNoCooldownEveryRecordTriesTheApi() {
+    smt.configure(config("ops.api.cooldown.ms", "0"));
+    store.fail = true;
+    try {
+      smt.apply(record(event("e1", 500)));
+      fail();
+    } catch (DataException e) {
+      // expected
+    }
+    store.fail = false;
+    assertNotNull(smt.apply(record(event("e2", 500))));
+    assertEquals(1, store.objects.size());
+  }
+
+  @Test
+  public void smallRecordsPassWhileTheApiIsDown() {
+    store.fail = true;
+    smt.configure(config());
+    SinkRecord r = record(event("e1", 1));
+    assertSame(r, smt.apply(r));
   }
 
   @Test
@@ -198,15 +240,9 @@ public class S3ClaimCheckTest {
   }
 
   @Test
-  public void rejectedProbeFailsAtStartupWithoutACustomCause() {
+  public void rejectedProbeDoesNotStopTheStartup() {
     store.rejectProbe = true;
-    try {
-      smt.configure(config());
-      fail();
-    } catch (ConnectException e) {
-      assertNull(e.getCause());
-      assertTrue(e.getMessage().contains("HTTP 404"));
-    }
+    smt.configure(config());
   }
 
   @Test
@@ -350,17 +386,6 @@ public class S3ClaimCheckTest {
         new com.fasterxml.jackson.core.JsonParseException(null, "Unexpected character"));
   }
 
-  @Test
-  public void startupFailureDropsAJacksonCauseAndKeepsTheMessage() {
-    store.failure = withJacksonCause();
-    try {
-      smt.configure(config());
-      fail();
-    } catch (ConnectException e) {
-      assertNull(e.getCause());
-      assertTrue(e.getMessage().contains("bad body from the route"));
-    }
-  }
 
   @Test
   public void retriableUploadFailureDropsAJacksonCauseAndKeepsTheMessage() {
@@ -369,7 +394,7 @@ public class S3ClaimCheckTest {
     try {
       smt.apply(record(event("e1", 500)));
       fail();
-    } catch (RetriableException e) {
+    } catch (DataException e) {
       assertNull(e.getCause());
       assertTrue(e.getMessage().contains("bad body from the route"));
     }
@@ -383,7 +408,7 @@ public class S3ClaimCheckTest {
     try {
       smt.apply(record(event("e1", 500)));
       fail();
-    } catch (RetriableException e) {
+    } catch (DataException e) {
       assertSame(timeout, e.getCause());
     }
   }
@@ -414,8 +439,8 @@ public class S3ClaimCheckTest {
     assertSame(null, S3ClaimCheck.safeCause(null));
   }
 
-  @Test(expected = ConnectException.class)
-  public void unreachableRouteFailsAtStartup() {
+  @Test
+  public void unreachableRouteDoesNotStopTheStartup() {
     store.fail = true;
     smt.configure(config());
   }

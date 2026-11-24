@@ -17,7 +17,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.junit.After;
 import org.junit.Before;
@@ -203,16 +202,34 @@ public class DealerSubscriptionFilterTest {
   }
 
   @Test
-  public void pollFailureKeepsCurrentSnapshot() {
+  public void pollFailureStillPassesSubscribedRecords() {
     smt.configure(config());
     versionBody.set("not json");
     smt.poll();
     assertNotNull(smt.apply(record(event("d1", "CUSTOMER", "pointintime"))));
   }
 
-  @Test(expected = ConnectException.class)
-  public void failedInitialLoadFailsConfigure() {
-    server.stop(0);
+  @Test
+  public void failedInitialLoadStartsOpenAndFiltersOnceTheApiAnswers() {
+    snapshotBody.set("not json");
     smt.configure(config());
+    assertNotNull(smt.apply(record(event("nobody", "CUSTOMER", "pointintime"))));
+    snapshotBody.set(snapshot(1000,
+        "{\"eventType\":\"pointintime\",\"dataType\":\"CUSTOMER\",\"dealerUuid\":\"d1\"}"));
+    smt.poll();
+    assertNull(smt.apply(record(event("nobody", "CUSTOMER", "pointintime"))));
+    assertNotNull(smt.apply(record(event("d1", "CUSTOMER", "pointintime"))));
+  }
+
+  @Test
+  public void aFailedPollPassesEverythingUntilTheNextGoodPoll() {
+    smt.configure(config());
+    assertNull(smt.apply(record(event("new-dealer", "CUSTOMER", "pointintime"))));
+    versionBody.set("not json");
+    smt.poll();
+    assertNotNull(smt.apply(record(event("new-dealer", "CUSTOMER", "pointintime"))));
+    versionBody.set("{\"version\": 1000}");
+    smt.poll();
+    assertNull(smt.apply(record(event("new-dealer", "CUSTOMER", "pointintime"))));
   }
 }
