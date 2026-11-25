@@ -41,7 +41,6 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
   public static final String CONNECT_TIMEOUT_CONFIG = "http.connect.timeout.ms";
   public static final String READ_TIMEOUT_CONFIG = "http.read.timeout.ms";
   public static final String UPLOAD_TIMEOUT_CONFIG = "http.upload.timeout.ms";
-  public static final String TIMING_WINDOW_CONFIG = "timing.log.interval.ms";
   public static final String COOLDOWN_CONFIG = "ops.api.cooldown.ms";
 
   static final String CLAIM_CHECK_FIELD = "claimCheck";
@@ -69,17 +68,13 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
           ConfigDef.Importance.LOW, "Timeout for uploading one body to the issued URL.")
       .define(COOLDOWN_CONFIG, ConfigDef.Type.LONG, 30_000L, ConfigDef.Range.atLeast(0),
           ConfigDef.Importance.LOW,
-          "After a failed ops API call, oversized records fail at once for this long. 0 turns it off.")
-      .define(TIMING_WINDOW_CONFIG, ConfigDef.Type.LONG, 60_000L, ConfigDef.Range.atLeast(0),
-          ConfigDef.Importance.LOW,
-          "Window of the apply() timing summary line in the log. 0 turns the timing off.");
+          "After a failed ops API call, oversized records fail at once for this long. 0 turns it off.");
 
   private static final Logger LOG = LoggerFactory.getLogger(S3ClaimCheck.class);
   private static final ObjectMapper MAPPER = new ObjectMapper();
 
   private int largeBytes;
   private BodyStore store;
-  private ApplyTiming timing;
   private long cooldownNanos;
   /** System.nanoTime() before which oversized records fail without calling the API. */
   private long refuseUntilNanos;
@@ -89,8 +84,6 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
   public void configure(Map<String, ?> configs) {
     AbstractConfig config = new AbstractConfig(CONFIG_DEF, configs);
     largeBytes = config.getInt(LARGE_BYTES_CONFIG);
-    timing = new ApplyTiming("s3-claim-check", config.getLong(TIMING_WINDOW_CONFIG),
-        System::nanoTime, LOG::info);
     cooldownNanos = config.getLong(COOLDOWN_CONFIG) * 1_000_000L;
     store = createStore(config);
     try {
@@ -111,18 +104,6 @@ public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<
 
   @Override
   public R apply(R record) {
-    if (!timing.enabled()) {
-      return claimCheck(record);
-    }
-    long started = timing.start();
-    try {
-      return claimCheck(record);
-    } finally {
-      timing.end(started);
-    }
-  }
-
-  private R claimCheck(R record) {
     Object value = record.value();
     if (value == null) {
       return record;
