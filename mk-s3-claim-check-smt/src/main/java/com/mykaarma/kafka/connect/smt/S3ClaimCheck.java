@@ -1,0 +1,275 @@
+package com.mykaarma.kafka.connect.smt;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import org.apache.kafka.common.config.AbstractConfig;
+import org.apache.kafka.common.config.ConfigDef;
+import org.apache.kafka.connect.connector.ConnectRecord;
+import org.apache.kafka.connect.data.Field;
+import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.errors.DataException;
+import org.apache.kafka.connect.transforms.Transformation;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Replaces a record that is too large for an async Lambda invoke with a small pointer record and
+ * writes the full body to S3. Chain it after the dealer filter, so only subscribed records arrive.
+ *
+ * <p>The pointer record is a schemaless Map holding the envelope fields plus
+ * claimCheck: {bucket, key}.
+ *
+ * <p>When the ops API cannot be reached, an oversized record throws a DataException instead of
+ * blocking: with errors.tolerance=all the connector sends it to its dead-letter topic and carries on.
+ * After a failed call the SMT refuses oversized records at once for a cool-down, so a dead API does
+ * not cost a full timeout per record. Records under the limit never touch the API.
+ */
+public class S3ClaimCheck<R extends ConnectRecord<R>> implements Transformation<R> {
+
+  public static final String LARGE_BYTES_CONFIG = "large.event.bytes";
+  public static final String BASE_URL_CONFIG = "ops.api.base.url";
+  public static final String USERNAME_CONFIG = "ops.api.username";
+  public static final String PASSWORD_CONFIG = "ops.api.password";
+  public static final String CONNECT_TIMEOUT_CONFIG = "http.connect.timeout.ms";
+  public static final String READ_TIMEOUT_CONFIG = "http.read.timeout.ms";
+  public static final String UPLOAD_TIMEOUT_CONFIG = "http.upload.timeout.ms";
+  public static final String COOLDOWN_CONFIG = "ops.api.cooldown.ms";
+
+  static final String CLAIM_CHECK_FIELD = "claimCheck";
+  static final String UNKNOWN_DEALER = "unknown";
+  static final List<String> ENVELOPE_FIELDS = Arrays.asList(
+      "dealerUuid", "dataType", "eventType", "eventId", "eventTimestamp", "departmentUuid");
+
+  public static final ConfigDef CONFIG_DEF = new ConfigDef()
+      .define(LARGE_BYTES_CONFIG, ConfigDef.Type.INT, 800_000, ConfigDef.Range.atLeast(1),
+          ConfigDef.Importance.HIGH,
+          "Estimated serialized size above which a record is claim-checked.")
+      .define(BASE_URL_CONFIG, ConfigDef.Type.STRING, ConfigDef.NO_DEFAULT_VALUE,
+          ConfigDef.Importance.HIGH,
+          "Ops API base URL up to /webhook/v1, with no trailing slash. POST /claim-check issues "
+              + "the upload URL.")
+      .define(USERNAME_CONFIG, ConfigDef.Type.STRING, ConfigDef.NO_DEFAULT_VALUE,
+          ConfigDef.Importance.HIGH, "Basic-auth username for the ops API.")
+      .define(PASSWORD_CONFIG, ConfigDef.Type.PASSWORD, ConfigDef.NO_DEFAULT_VALUE,
+          ConfigDef.Importance.HIGH, "Basic-auth password for the ops API.")
+      .define(CONNECT_TIMEOUT_CONFIG, ConfigDef.Type.INT, 3000, ConfigDef.Range.atLeast(1),
+          ConfigDef.Importance.LOW, "Connect timeout for the ops API call.")
+      .define(READ_TIMEOUT_CONFIG, ConfigDef.Type.INT, 5000, ConfigDef.Range.atLeast(1),
+          ConfigDef.Importance.LOW, "Read timeout for the ops API call.")
+      .define(UPLOAD_TIMEOUT_CONFIG, ConfigDef.Type.INT, 30_000, ConfigDef.Range.atLeast(1),
+          ConfigDef.Importance.LOW, "Timeout for uploading one body to the issued URL.")
+      .define(COOLDOWN_CONFIG, ConfigDef.Type.LONG, 30_000L, ConfigDef.Range.atLeast(0),
+          ConfigDef.Importance.LOW,
+          "After a failed ops API call, oversized records fail at once for this long. 0 turns it off.");
+
+  private static final Logger LOG = LoggerFactory.getLogger(S3ClaimCheck.class);
+  private static final ObjectMapper MAPPER = new ObjectMapper();
+
+  private int largeBytes;
+  private BodyStore store;
+  private long cooldownNanos;
+  /** System.nanoTime() before which oversized records fail without calling the API. */
+  private long refuseUntilNanos;
+  private boolean refusing;
+
+  @Override
+  public void configure(Map<String, ?> configs) {
+    AbstractConfig config = new AbstractConfig(CONFIG_DEF, configs);
+    largeBytes = config.getInt(LARGE_BYTES_CONFIG);
+    cooldownNanos = config.getLong(COOLDOWN_CONFIG) * 1_000_000L;
+    store = createStore(config);
+    try {
+      store.probe();
+    } catch (IOException e) {
+      // An outage must not keep the connector from starting: records under the limit never use the
+      // API. A wrong URL or credential shows up as a failed oversized record instead.
+      LOG.warn("Could not get a claim-check upload URL from {}, oversized records will fail "
+          + "until it answers: {}", config.getString(BASE_URL_CONFIG), e.getMessage());
+    }
+  }
+
+  BodyStore createStore(AbstractConfig config) {
+    return new ApiBodyStore(config.getString(BASE_URL_CONFIG), config.getString(USERNAME_CONFIG),
+        config.getPassword(PASSWORD_CONFIG).value(), config.getInt(CONNECT_TIMEOUT_CONFIG),
+        config.getInt(READ_TIMEOUT_CONFIG), config.getInt(UPLOAD_TIMEOUT_CONFIG));
+  }
+
+  @Override
+  public R apply(R record) {
+    Object value = record.value();
+    if (value == null) {
+      return record;
+    }
+    Object plain = toPlain(value);
+    byte[] body;
+    try {
+      body = MAPPER.writeValueAsBytes(plain);
+    } catch (JsonProcessingException e) {
+      // Jackson is shaded into this jar, so its exception cannot be rebuilt by the worker.
+      throw new DataException("Could not serialize the record value to JSON: "
+          + e.getOriginalMessage());
+    }
+    if (body.length <= largeBytes) {
+      return record;
+    }
+    @SuppressWarnings("unchecked")
+    Map<String, Object> map = (Map<String, Object>) plain;
+    String eventId = keyName(map.get("eventId"), body);
+    String dealerUuid = safe(map.get("dealerUuid"), UNKNOWN_DEALER);
+    if (refusing && System.nanoTime() - refuseUntilNanos < 0) {
+      throw new DataException("Claim-check skipped for event " + eventId
+          + ": the ops API failed a moment ago");
+    }
+    BodyStore.Location location;
+    try {
+      location = store.put(eventId, dealerUuid, body);
+      refusing = false;
+    } catch (BodyStore.RejectedException e) {
+      // No cause: the worker cannot load RejectedException, so it carries only its message.
+      throw new DataException("Claim-check upload rejected for event " + eventId + ": "
+          + e.getMessage());
+    } catch (IOException e) {
+      if (cooldownNanos > 0) {
+        refusing = true;
+        refuseUntilNanos = System.nanoTime() + cooldownNanos;
+      }
+      // Not retriable: a retry would hold the partition. The connector's dead-letter topic takes it.
+      throw new DataException("Claim-check upload failed for event " + eventId + ": "
+          + e.getMessage(), safeCause(e));
+    }
+    Map<String, Object> pointer = new LinkedHashMap<>();
+    for (String field : ENVELOPE_FIELDS) {
+      if (map.containsKey(field)) {
+        pointer.put(field, map.get(field));
+      }
+    }
+    Map<String, Object> claim = new LinkedHashMap<>();
+    claim.put("bucket", location.bucket);
+    claim.put("key", location.key);
+    pointer.put(CLAIM_CHECK_FIELD, claim);
+    return record.newRecord(record.topic(), record.kafkaPartition(), record.keySchema(),
+        record.key(), null, pointer, record.timestamp(), record.headers());
+  }
+
+  /**
+   * The cause to keep on an exception that leaves the SMT. The SMT runs in Confluent's function
+   * runtime and the worker rebuilds what it throws, so a class that is not a JDK or Kafka type,
+   * such as our own exception or a shaded Jackson one, becomes ClassNotFoundException and hides the
+   * real error. Such a chain is dropped; callers put its message in their own.
+   */
+  static Throwable safeCause(Throwable e) {
+    for (Throwable t = e; t != null; t = t.getCause()) {
+      String name = t.getClass().getName();
+      if (!(name.startsWith("java.") || name.startsWith("javax.")
+          || name.startsWith("org.apache.kafka."))) {
+        return null;
+      }
+    }
+    return e;
+  }
+
+  /**
+   * Turns a value into one key segment the ops API accepts: 1-128 of A-Z a-z 0-9 . _ -
+   *
+   * Every non-empty value carries the full SHA-256 of the original, 64 hex characters, after a readable
+   * prefix cut to fit the 128-character limit. Sanitizing and truncating can map distinct values to one
+   * string, and a retry overwrites the object at its key. Hashing only the values that changed leaves a
+   * gap: an unchanged value such as "a_b_c-<hash>" can equal the key generated for "a/b c". A shortened
+   * digest leaves another: two ids whose digests share a prefix collide once the readable part is cut.
+   * With the full digest on every value, two different originals share a segment only on a SHA-256
+   * collision. The same input always gives the same segment, so retries stay idempotent. The fallback for
+   * an empty value has no hash, so it stays in a separate namespace: a value that is literally "unknown"
+   * becomes "unknown-<hash>".
+   */
+  static String safe(Object value, String fallback) {
+    String original = value == null ? "" : value.toString();
+    String s = original.replaceAll("[^A-Za-z0-9._-]", "_");
+    if (s.isEmpty()) {
+      return fallback;
+    }
+    String suffix = "-" + sha256Hex(codeUnits(original));
+    int room = 128 - suffix.length();
+    return (s.length() > room ? s.substring(0, room) : s) + suffix;
+  }
+
+  /**
+   * The string's UTF-16 code units, two bytes each. Unlike getBytes(UTF_8), this keeps an unpaired
+   * surrogate as it is: getBytes turns each into "?", so "\uD800" and "\uD801" would hash alike.
+   */
+  static byte[] codeUnits(String value) {
+    byte[] out = new byte[value.length() * 2];
+    for (int i = 0; i < value.length(); i++) {
+      char c = value.charAt(i);
+      out[2 * i] = (byte) (c >> 8);
+      out[2 * i + 1] = (byte) c;
+    }
+    return out;
+  }
+
+  private static String sha256Hex(byte[] bytes) {
+    try {
+      byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
+      StringBuilder hex = new StringBuilder();
+      for (byte b : digest) {
+        hex.append(String.format("%02x", b));
+      }
+      return hex.toString();
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  /** The event id makes a retry overwrite the same object, a content hash covers records without one. */
+  static String keyName(Object eventId, byte[] body) {
+    if (eventId != null && !eventId.toString().isEmpty()) {
+      return safe(eventId, "event");
+    }
+    return sha256Hex(body);
+  }
+
+  /** Converts a Struct tree to plain Maps and Lists. Maps and scalars pass through. */
+  static Object toPlain(Object value) {
+    if (value instanceof Struct) {
+      Struct struct = (Struct) value;
+      Map<String, Object> out = new LinkedHashMap<>();
+      for (Field f : struct.schema().fields()) {
+        out.put(f.name(), toPlain(struct.get(f)));
+      }
+      return out;
+    }
+    if (value instanceof Map) {
+      Map<String, Object> out = new LinkedHashMap<>();
+      for (Map.Entry<?, ?> e : ((Map<?, ?>) value).entrySet()) {
+        out.put(String.valueOf(e.getKey()), toPlain(e.getValue()));
+      }
+      return out;
+    }
+    if (value instanceof List) {
+      List<Object> out = new java.util.ArrayList<>();
+      for (Object o : (List<?>) value) {
+        out.add(toPlain(o));
+      }
+      return out;
+    }
+    if (value instanceof byte[]) {
+      return java.util.Base64.getEncoder().encodeToString((byte[]) value);
+    }
+    return value;
+  }
+
+  @Override
+  public ConfigDef config() {
+    return CONFIG_DEF;
+  }
+
+  @Override
+  public void close() {}
+}
